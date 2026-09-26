@@ -3,3 +3,5 @@ DesktopRoach
 *.log
 nohup.out
 /*.png
+.omx/
+.git-old-history-*/
