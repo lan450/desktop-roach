@@ -86,9 +86,9 @@ func offscreenRender(_ scene: SCNScene, camNode: SCNNode, size: CGSize, path: St
 /// straight down, same key light. That is the only view users actually see, so
 /// it is the one to check body geometry against.
 func runSnapshot(path: String, topDown: Bool = false, flying: Bool = false, walking: Bool = false,
-                 brood: Bool = false) {
+                 brood: Bool = false, transparent: Bool = false) {
     let scene = SCNScene()
-    scene.background.contents = NSColor(calibratedWhite: 0.94, alpha: 1)
+    if !transparent { scene.background.contents = NSColor(calibratedWhite: 0.94, alpha: 1) }
     let fly = Fly(at: .zero)
     fly.heading = .pi / 2
     if brood { fly.carryingDays = 0.5; fly.syncOotheca() }   // pose a carrying female
@@ -1588,7 +1588,8 @@ if let i = args.firstIndex(of: "--snapshot") {
     if args.contains("--roach") { BODY_FORM = .roach }  // after --beetle, so --roach wins if both are given
     runSnapshot(path: args.count > i + 1 ? args[i + 1] : "preview.png",
                 topDown: args.contains("--top"), flying: args.contains("--flying"),
-                walking: args.contains("--walking"), brood: args.contains("--brood"))
+                walking: args.contains("--walking"), brood: args.contains("--brood"),
+                transparent: args.contains("--transparent"))
     exit(0)
 }
 if let i = args.firstIndex(of: "--brainshot") {

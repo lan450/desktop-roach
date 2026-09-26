@@ -19,6 +19,16 @@ The brain is a fruit fly's; the roach is a body, not a cockroach nervous system.
   <img src="assets/brain.png" width="560" alt="Live brain window: 23,210 real neuron positions, spikes flashing">
 </p>
 
+<p align="center">
+  <img src="assets/desktop.png" width="620" alt="DesktopRoach on the desktop: roach #1 floating, the colony in the window layers">
+</p>
+
+<p align="center"><sub>
+A desktop moment: roach #1 (with the brain) floats above everything while
+the colony — different sizes, a female dragging her ootheca — lives in the
+window layers underneath your windows.
+</sub></p>
+
 <p align="center"><sub>
 The fly's brain window: 23,210 real neuron soma positions from FlyWire v783,
 with live spikes flashing at real neuron locations. The two glowing yellow
