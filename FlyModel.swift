@@ -8,6 +8,33 @@ import simd
 
 let SHADOWS_ENABLED = true
 let FLY_SCALE: CGFloat = 1.15
+
+/// Colony dynamics for the breeding feature, anchored on real Periplaneta
+/// americana biology and compressed for the desktop: an ootheca carries
+/// ~14-16 eggs and is carried ~2 days, nymphs mature in ~90 days, and a
+/// fertilized female starts a new ootheca every ~4 days under good
+/// conditions. One simulated day lasts `daySeconds` real seconds, so a
+/// nymph reaches adulthood in ~45 minutes and the colony visibly snowballs.
+enum RoachBreeding {
+    static let daySeconds: CGFloat = 30       // real seconds per simulated day at 1x
+    /// Colony clock multiplier, driven by the menu-bar slider (1-100). It
+    /// compresses every breeding timescale uniformly: at 100x an ootheca
+    /// hatches in 0.6 s and a nymph matures in ~27 s — the "watch it happen"
+    /// setting; at 1x the anchored biology runs at its own pace.
+    static var speedMultiplier: CGFloat = 1
+    static var daySecondsNow: CGFloat { daySeconds / speedMultiplier }
+    static let oothecaDays: CGFloat = 2       // the case is carried before hatching
+    static let intervalDays: CGFloat = 4      // rest between broods
+    static let maturityDays: CGFloat = 90     // nymph -> adult
+    static let nymphSize: ClosedRange<CGFloat> = 0.38...0.52
+    static let adultSize: ClosedRange<CGFloat> = 0.8...1.25
+    static let eggsRange = 6...9              // nymphs per ootheca, sim-friendly
+    /// Hard cap on the colony, user-settable from the menu slider. Each roach
+    /// builds its own mesh (~30 k vertices), so this is the memory guard.
+    static var colonyCap = 48
+    static let pairDistance: CGFloat = 70     // courtship proximity, desktop pt
+    static let chancePerSecond: CGFloat = 0.2 // when a ready pair is close
+}
 let EDGE_MARGIN: CGFloat = 50
 let SCARE_RADIUS: CGFloat = 110        // legacy behavior (non-connectome flies) only
 let NERVOUS_RADIUS: CGFloat = 240      // legacy behavior only
@@ -50,13 +77,116 @@ let SWING_DUR: CGFloat = 0.035
 enum BodyForm: String {
     case fly = "fruit fly"
     case beetle = "stag beetle"
+    case roach = "cockroach"
 }
-var BODY_FORM: BodyForm = .fly
+// DesktopRoach's identity is the roach, so the boot default is .roach (the
+// menu still cycles through all three forms). Self-tests set BODY_FORM
+// explicitly, so they are unaffected by the default.
+var BODY_FORM: BodyForm = .roach
+
+/// Menu cycling: each click offers the next form; the label shows the target.
+let BODY_FORM_CYCLE: [BodyForm] = [.fly, .beetle, .roach]
+
+func nextForm(_ f: BodyForm) -> BodyForm {
+    let i = BODY_FORM_CYCLE.firstIndex(of: f) ?? 0
+    return BODY_FORM_CYCLE[(i + 1) % BODY_FORM_CYCLE.count]
+}
+
+func bodyName(_ f: BodyForm) -> String {
+    switch f {
+    case .fly:    return "Fruit Fly"
+    case .beetle: return "Stag Beetle"
+    case .roach:  return "Cockroach"
+    }
+}
+
+/// One master copy per body form. The first build runs the procedural
+/// constructors; every later body is `SCNNode.clone()` of the master, which
+/// shares all SCNGeometry instances — one GPU upload per form instead of one
+/// per roach, and swapping skins across a 48-roach colony stops stuttering.
+struct BodyTemplate {
+    let root: SCNNode
+    let legSpecs: [(geometry: LegGeometry, baseYaw: CGFloat, swingSign: CGFloat,
+                    phase: CGFloat, isFront: Bool)]
+    let wingFlightSpread: CGFloat
+}
+
+enum BodyFactory {
+    private static var templates: [BodyForm: BodyTemplate] = [:]
+
+    private static func build(_ form: BodyForm) -> FlyModel {
+        switch form {
+        case .fly:    return buildFlyModel()
+        case .beetle: return buildBeetleModel()
+        case .roach:  return buildRoachModel()
+        }
+    }
+
+    private static func template(_ form: BodyForm) -> BodyTemplate {
+        if let t = templates[form] { return t }
+        let model = build(form)
+        let root = model.root
+        for (i, leg) in model.legs.enumerated() {
+            leg.root.name = "leg\(i).root"
+            leg.knee.name = "leg\(i).knee"
+            leg.ankle.name = "leg\(i).ankle"
+        }
+        model.foldedWings.name = "foldedWings"
+        model.blurWingL.name = "blurWingL"
+        model.blurWingR.name = "blurWingR"
+        model.abdomen.name = "abdomen"
+        model.elytraL?.name = "elytraL"
+        model.elytraR?.name = "elytraR"
+        let specs = model.legs.map {
+            (geometry: $0.geometry, baseYaw: $0.baseYaw, swingSign: $0.swingSign,
+             phase: $0.phase, isFront: $0.isFront)
+        }
+        let t = BodyTemplate(root: root, legSpecs: specs, wingFlightSpread: model.wingFlightSpread)
+        templates[form] = t
+        return t
+    }
+
+    static func instantiate(_ form: BodyForm) -> FlyModel {
+        let t = template(form)
+        let root = t.root.clone()
+        let legs = t.legSpecs.enumerated().map { i, spec -> Leg in
+            let r = root.childNode(withName: "leg\(i).root", recursively: true)!
+            let k = root.childNode(withName: "leg\(i).knee", recursively: true)!
+            let a = root.childNode(withName: "leg\(i).ankle", recursively: true)!
+            let leg = Leg(root: r, knee: k, ankle: a, geometry: spec.geometry,
+                          baseYaw: spec.baseYaw, swingSign: spec.swingSign,
+                          phase: spec.phase, isFront: spec.isFront)
+            leg.apply()   // restore the rest pose on the cloned joints
+            return leg
+        }
+        return FlyModel(
+            root: root,
+            legs: legs,
+            foldedWings: root.childNode(withName: "foldedWings", recursively: true)!,
+            blurWingL: root.childNode(withName: "blurWingL", recursively: true)!,
+            blurWingR: root.childNode(withName: "blurWingR", recursively: true)!,
+            abdomen: root.childNode(withName: "abdomen", recursively: true)!,
+            elytraL: root.childNode(withName: "elytraL", recursively: true),
+            elytraR: root.childNode(withName: "elytraR", recursively: true),
+            wingFlightSpread: t.wingFlightSpread)
+    }
+}
 
 func buildBody() -> FlyModel {
-    switch BODY_FORM {
-    case .fly:    return buildFlyModel()
-    case .beetle: return buildBeetleModel()
+    BodyFactory.instantiate(BODY_FORM)
+}
+
+/// Pure hatch planning, kept testable: where the nymphs scatter around the
+/// mother, each with its nymph size and the adult size it will grow toward.
+enum RoachBrood {
+    static func planHatch(from mother: Fly) -> [(pos: CGPoint, size: CGFloat, target: CGFloat)] {
+        let n = Int(rnd(CGFloat(RoachBreeding.eggsRange.lowerBound)...CGFloat(RoachBreeding.eggsRange.upperBound) + 0.999))
+        return (0..<n).map { _ in
+            let angle = rnd(0...(2 * .pi)), r = rnd(12...45)
+            let p = CGPoint(x: mother.pos.x + cos(angle) * r,
+                            y: mother.pos.y + sin(angle) * r)
+            return (p, rnd(RoachBreeding.nymphSize), rnd(RoachBreeding.adultSize))
+        }
     }
 }
 
@@ -112,8 +242,8 @@ func abdomenTexture() -> NSImage {
     let size = NSSize(width: 64, height: 128)
     let img = NSImage(size: size)
     img.lockFocus()
-    let base = NSColor(calibratedRed: 0.72, green: 0.55, blue: 0.32, alpha: 1)
-    let dark = NSColor(calibratedRed: 0.22, green: 0.15, blue: 0.09, alpha: 1)
+    let base = NSColor(calibratedRed: 0.87, green: 0.58, blue: 0.43, alpha: 1)
+    let dark = NSColor(calibratedRed: 0.66, green: 0.34, blue: 0.36, alpha: 1)
     base.setFill()
     NSRect(origin: .zero, size: size).fill()
     dark.setFill()
@@ -225,6 +355,31 @@ func buildLeg(attach: SCNVector3, baseYaw: CGFloat, swingSign: CGFloat, phase: C
     return leg
 }
 
+/// The leathery egg case a fertilized female drags at her tail. One shared
+/// accessory for every body form: pure display, nothing reads it back.
+func buildOotheca() -> SCNNode {
+    let node = SCNNode()
+    // Dragged behind the tegmina tips: under the wings it would be invisible
+    // from the desktop's top-down view, which is not how a carrying female
+    // reads. Local terms, so it follows whatever body form is mounted.
+    node.position = SCNVector3(0, -16.8, 2.9)
+    let caseGeo = SCNCapsule(capRadius: 0.55, height: 2.7)
+    caseGeo.materials = [mat(NSColor(calibratedRed: 0.34, green: 0.18, blue: 0.09, alpha: 1),
+                             specular: 0.22, shininess: 0.3)]
+    let caseNode = SCNNode(geometry: caseGeo)
+    caseNode.position = SCNVector3(0, -1.3, -0.55)
+    caseNode.eulerAngles = SCNVector3(CGFloat.pi / 2 - 0.55, 0, 0)  // trails back, tip down
+    node.addChildNode(caseNode)
+    // the keel seam that real oothecae carry along their top edge
+    let seamGeo = SCNCapsule(capRadius: 0.055, height: 2.4)
+    seamGeo.materials = [mat(NSColor(calibratedRed: 0.18, green: 0.08, blue: 0.04, alpha: 1))]
+    let seam = SCNNode(geometry: seamGeo)
+    seam.position = SCNVector3(0, -1.15, 0.28)
+    seam.eulerAngles = SCNVector3(CGFloat.pi / 2 - 0.4, 0, 0)
+    node.addChildNode(seam)
+    return node
+}
+
 func wingShape() -> SCNGeometry {
     // Put the hinge at the end of the membrane, so raising a wing cannot
     // rotate a forward-projecting root through the thorax.
@@ -245,10 +400,12 @@ func buildFlyModel() -> FlyModel {
     let root = SCNNode()
     root.scale = SCNVector3(FLY_SCALE, FLY_SCALE, FLY_SCALE)
 
-    let bodyBrown = NSColor(calibratedRed: 0.50, green: 0.38, blue: 0.22, alpha: 1)
+    let honey = NSColor(calibratedRed: 0.94, green: 0.66, blue: 0.43, alpha: 1)
+    let cream = NSColor(calibratedRed: 1.0, green: 0.84, blue: 0.65, alpha: 1)
+    let plum = NSColor(calibratedRed: 0.28, green: 0.13, blue: 0.23, alpha: 1)
 
     let thoraxGeo = SCNSphere(radius: 4.6)
-    thoraxGeo.materials = [mat(bodyBrown, specular: 0.35, shininess: 0.4)]
+    thoraxGeo.materials = [mat(honey, specular: 0.35, shininess: 0.4)]
     let thorax = SCNNode(geometry: thoraxGeo)
     thorax.position = SCNVector3(0, 2.5, 6.2)
     thorax.scale = SCNVector3(0.95, 1.15, 0.85)
@@ -267,15 +424,14 @@ func buildFlyModel() -> FlyModel {
     root.addChildNode(abdomen)
 
     let headGeo = SCNSphere(radius: 3.0)
-    headGeo.materials = [mat(bodyBrown.blended(withFraction: 0.15, of: .white) ?? bodyBrown)]
+    headGeo.materials = [mat(cream)]
     let head = SCNNode(geometry: headGeo)
     head.position = SCNVector3(0, 9.0, 6.0)
     head.scale = SCNVector3(1.0, 0.85, 0.9)
     root.addChildNode(head)
 
     let eyeGeo = SCNSphere(radius: 2.0)
-    eyeGeo.materials = [mat(NSColor(calibratedRed: 0.62, green: 0.10, blue: 0.07, alpha: 1),
-                            specular: 0.9, shininess: 0.9)]
+    eyeGeo.materials = [mat(plum, specular: 0.9, shininess: 0.9)]
     for side in [CGFloat(-1), 1] {
         let eye = SCNNode(geometry: eyeGeo)
         eye.position = SCNVector3(side * 2.1, 9.7, 6.4)
@@ -284,7 +440,7 @@ func buildFlyModel() -> FlyModel {
     }
 
     let antGeo = SCNCapsule(capRadius: 0.16, height: 2.2)
-    antGeo.materials = [mat(NSColor(calibratedRed: 0.3, green: 0.22, blue: 0.13, alpha: 1))]
+    antGeo.materials = [mat(plum)]
     for side in [CGFloat(-1), 1] {
         let ant = SCNNode(geometry: antGeo)
         ant.position = SCNVector3(side * 0.9, 11.6, 6.3)
@@ -293,7 +449,7 @@ func buildFlyModel() -> FlyModel {
     }
 
     let probGeo = SCNCone(topRadius: 0.6, bottomRadius: 0.22, height: 2.4)
-    probGeo.materials = [mat(NSColor(calibratedRed: 0.35, green: 0.26, blue: 0.16, alpha: 1))]
+    probGeo.materials = [mat(plum)]
     let prob = SCNNode(geometry: probGeo)
     prob.position = SCNVector3(0, 10.4, 4.6)
     prob.eulerAngles = SCNVector3(-0.5, 0, 0)
@@ -312,7 +468,8 @@ func buildFlyModel() -> FlyModel {
     for (side, attach, yawOff, phase, isFront, f, t, ta) in specs {
         let baseYaw: CGFloat = side > 0 ? yawOff : (.pi - yawOff)
         let leg = buildLeg(attach: attach, baseYaw: baseYaw, swingSign: side, phase: phase,
-                           isFront: isFront, femur: f, tibia: t, tarsus: ta)
+                           isFront: isFront, femur: f, tibia: t, tarsus: ta,
+                           color: NSColor(calibratedRed: 0.66, green: 0.39, blue: 0.34, alpha: 1))
         root.addChildNode(leg.root)
         legs.append(leg)
     }
@@ -407,16 +564,48 @@ final class Fly {
     var flapPhase: CGFloat = 0
     var wingRaise: CGFloat = 0        // grounded threat posture (escape-DN driven)
     var elytraOpen: CGFloat = 0       // display only: 0 closed .. 1 fully spread
+
+    // -- colony life (breeding + individual size) --
+    /// Render scale multiplier. Roach #1 is fixed at 1; later roaches and
+    /// hatchlings vary. Every scale write goes through this.
+    var sizeScale: CGFloat
+    /// Size this roach grows toward; equal to `sizeScale` for adults.
+    let adultTarget: CGFloat
+    /// Size at emergence; growth is linear in simulated age toward adultTarget.
+    private let birthSize: CGFloat
+    /// Simulated age in days; adults have lived maturityDays.
+    var ageDays: CGFloat
+    /// >= 0 while an ootheca is carried, in simulated days since fertilization.
+    var carryingDays: CGFloat = -1
+    /// Simulated days of rest before this roach can breed again.
+    var broodCooldownDays: CGFloat = 0
+    private var ootheca: SCNNode?
+    var isAdult: Bool { ageDays >= RoachBreeding.maturityDays }
+    var canMate: Bool {
+        isAdult && carryingDays < 0 && broodCooldownDays <= 0 && state != .sleeping
+    }
+
     private var brainLive = false
     private var liveArousal: CGFloat = 0
     private var liveWing: CGFloat = 0
 
-    init(at p: CGPoint) {
+    /// `size` is the render scale multiplier (roach #1 is fixed at 1; later
+    /// roaches vary). Pass `adultTarget > size` for a nymph, which then grows
+    /// linearly toward it over maturityDays; the default is an adult that
+    /// keeps its size. Adults start exactly at maturity — no random draw
+    /// here, so the seeded TestRandom streams of the behavior tests stay put.
+    init(at p: CGPoint, size: CGFloat = 1, adultTarget target: CGFloat? = nil) {
         model = buildBody()
         legDynamics = SixLegDynamics(geometries: model.legs.map(\.geometry))
         for (leg, pose) in zip(model.legs, legDynamics.feedback) { leg.apply(pose) }
         sensedLegFeedback = []
+        sizeScale = size
+        birthSize = size
+        adultTarget = target ?? size
+        ageDays = target == nil ? RoachBreeding.maturityDays : 0
         pos = p
+        model.root.scale = SCNVector3(FLY_SCALE * sizeScale,
+                                      FLY_SCALE * sizeScale, FLY_SCALE * sizeScale)
         syncNode()
     }
 
@@ -489,13 +678,44 @@ final class Fly {
         model.blurWingR.isHidden = false
     }
 
+    /// Keep the carried ootheca attached: built lazily, reattached after a
+    /// body swap (the old root took it away), hidden once the brood hatches.
+    /// Exposed for the snapshot poser, which sets `carryingDays` without
+    /// running behavior ticks; the render loop reaches it through update().
+    func syncOotheca() {
+        let carrying = carryingDays >= 0
+        if carrying && ootheca == nil { ootheca = buildOotheca() }
+        guard let caseNode = ootheca else { return }
+        if caseNode.parent == nil && carrying { model.root.addChildNode(caseNode) }
+        caseNode.isHidden = !carrying
+    }
+
+    /// The ootheca hatched; back to resting until the next brood.
+    func hatchDone() {
+        carryingDays = -1
+        ootheca?.removeFromParentNode()
+        ootheca = nil
+    }
+
+    /// Courtship between two ready adults: one of them (the "mother") starts
+    /// carrying an ootheca, both take a rest. Returns whether it happened.
+    func tryFertilize(_ partner: Fly) -> Bool {
+        guard canMate && partner.canMate else { return false }
+        let mother = rnd(0...1) < 0.5 ? self : partner
+        mother.carryingDays = 0
+        mother.broodCooldownDays = RoachBreeding.intervalDays
+        partner.broodCooldownDays = RoachBreeding.intervalDays * 0.5
+        return true
+    }
+
     private func land() {
         setState(.idle)
         stateTimer = rnd(0.3...0.8)
         speed = 0
         alt = 0
         pitch = 0
-        node.scale = SCNVector3(FLY_SCALE, FLY_SCALE, FLY_SCALE)
+        node.scale = SCNVector3(FLY_SCALE * sizeScale, FLY_SCALE * sizeScale,
+                                FLY_SCALE * sizeScale)
         var p = node.position; p.z = 0; node.position = p
         // Wing closure and leg settling continue from their airborne poses.
     }
@@ -562,6 +782,21 @@ final class Fly {
         scareCooldown = max(0, scareCooldown - dt)
         dartCooldown = max(0, dartCooldown - dt)
         backwardTimer = max(0, backwardTimer - dt)
+
+        // colony life: aging, nymph growth, carried ootheca
+        let day = RoachBreeding.daySecondsNow   // slider-scaled colony clock
+        ageDays += dt / day
+        if carryingDays >= 0 { carryingDays += dt / day }
+        if broodCooldownDays > 0 { broodCooldownDays = max(0, broodCooldownDays - dt / day) }
+        let grown = birthSize + (adultTarget - birthSize) * min(1, ageDays / RoachBreeding.maturityDays)
+        if abs(grown - sizeScale) > 0.0001 {
+            sizeScale = grown
+            if state != .flying {   // applyAltitude already includes sizeScale mid-flight
+                node.scale = SCNVector3(FLY_SCALE * sizeScale,
+                                        FLY_SCALE * sizeScale, FLY_SCALE * sizeScale)
+            }
+        }
+        syncOotheca()
 
         stateAge += dt
         dartTimer = max(0, dartTimer - dt)
@@ -776,7 +1011,7 @@ final class Fly {
     }
 
     private func applyAltitude() {
-        let s = FLY_SCALE * (1 + 0.8 * alt)
+        let s = FLY_SCALE * sizeScale * (1 + 0.8 * alt)
         node.scale = SCNVector3(s, s, s)
         var p = node.position
         p.z = 90 * alt

@@ -1,14 +1,18 @@
 <p align="center">
-  <img src="assets/fly.png" width="340" alt="DesktopFly — a 3D fruit fly">
+  <img src="assets/roach.png" width="340" alt="DesktopRoach — the fly's brain driving a cockroach body">
 </p>
 
-<h1 align="center">DesktopFly 🪰</h1>
+<h1 align="center">DesktopRoach 🪳</h1>
 
 <p align="center">
-A 3D fruit fly that lives on your macOS desktop, with spiking simulations
-built from <a href="https://codex.flywire.ai">FlyWire</a> brain wiring and
-the <a href="https://male-cns.janelia.org/">MaleCNS</a> brain-to-leg network.
-It combines identified neural circuits with modeled senses, joints and behavior.
+A fork of <a href="https://github.com/DenisSergeevitch/desktop-fly">DesktopFly</a>
+(v1.1.0, commit 32b0001, plus that project's local color customizations) in which
+the same spiking brain — <a href="https://codex.flywire.ai">FlyWire</a> wiring and
+the <a href="https://male-cns.janelia.org/">MaleCNS</a> brain-to-leg network —
+drives a procedural American-cockroach body. The fly and stag-beetle bodies are
+still there: all three are interchangeable skins over one <code>FlyModel</code>
+contract, switched from the menu-bar item (or <code>--roach</code> for snapshots).
+The brain is a fruit fly's; the roach is a body, not a cockroach nervous system.
 </p>
 
 <p align="center">
@@ -87,13 +91,13 @@ No permissions or entitlements needed — everything it senses
 (cursor, window frames, clicks-as-taps, thermal state) is permission-free.
 
 ```sh
-git clone https://github.com/DenisSergeevitch/desktop-fly.git
-cd desktop-fly
+# no public remote yet; the project lives at ~/Projects/desktop-roach
+cd ~/Projects/desktop-roach
 ./build.sh
-./DesktopFly
+./DesktopRoach
 ```
 
-A 🪰 item appears in the menu bar; quit from there. The fly wanders your
+A 🪳 item appears in the menu bar; quit from there. The fly wanders your
 desktop on a transparent, click-through overlay — it never intercepts your
 mouse or keyboard.
 
@@ -113,9 +117,9 @@ npm test           # all three suites, headless
 
 See [windows/README.md](windows/README.md) for the macOS→Windows mapping
 table and platform notes (the fly there roams all monitors on its own).
-The optional stag-beetle body is macOS-only for now.
+The optional stag-beetle and cockroach bodies are macOS-only for now.
 
-## Controls (menu bar 🪰)
+## Controls (menu bar 🪳)
 
 | item | effect |
 |---|---|
@@ -125,7 +129,7 @@ The optional stag-beetle body is macOS-only for now.
 | Move to Next Display | hop the fly across monitors (shown when >1 display) |
 | Add / Remove Fly | extra flies (only fly #1 carries the brain) |
 | Scare Flies | startle everyone |
-| Body: Fruit Fly / Stag Beetle | swap the body geometry — behavior is unchanged |
+| Body: … | cycles Fruit Fly → Stag Beetle → Cockroach; behavior is unchanged |
 
 <p align="center">
   <img src="assets/beetle.png" width="300" alt="The optional stag-beetle body">
@@ -218,14 +222,14 @@ the repository; the original FlyWire files are not changed by this extractor.
 ## Diagnostics
 
 ```sh
-./DesktopFly --simtest        # circuit invariants and stimulus responses
-./DesktopFly --behaviortest   # end-to-end neural/body checks
-./DesktopFly --locomotortest  # actual MaleCNS closed loop, direction, lesions, frame-rate checks
-./DesktopFly --snapshot f.png  # offscreen body render (3/4 perspective)
-./DesktopFly --snapshot f.png --top [--flying] [--beetle]   # the overlay's own
+./DesktopRoach --simtest        # circuit invariants and stimulus responses
+./DesktopRoach --behaviortest   # end-to-end neural/body checks
+./DesktopRoach --locomotortest  # actual MaleCNS closed loop, direction, lesions, frame-rate checks
+./DesktopRoach --snapshot f.png  # offscreen body render (3/4 perspective)
+./DesktopRoach --snapshot f.png --top [--flying] [--beetle] [--roach]  # the overlay's own
                                # top-down orthographic view, the one users see
-./DesktopFly --brainshot b.png # offscreen brain render
-./DesktopFly --snapshot walk.png --top --walking # pose from the live motor circuit
+./DesktopRoach --brainshot b.png # offscreen brain render
+./DesktopRoach --snapshot walk.png --top --walking # pose from the live motor circuit
 ```
 
 ## What's modeled vs. measured

@@ -1,8 +1,10 @@
-# DesktopFly — agent notes
+# DesktopRoach — agent notes
 
-A 3D fruit fly on a transparent macOS overlay, with a 668-neuron female
-FlyWire v783 brain circuit and a 1,045-neuron male MaleCNS v1.0 locomotor
-circuit. A modeled homologous population-rate interface joins the simulations;
+Fork of DesktopFly at 32b0001 (v1.1.0) + its local color customizations; that
+upstream project is untouched. A 3D fruit fly / stag beetle / American cockroach
+on a transparent macOS overlay — interchangeable skins over the same
+`FlyModel` contract — with a 668-neuron female FlyWire v783 brain circuit and a
+1,045-neuron male MaleCNS v1.0 locomotor circuit. A modeled homologous population-rate interface joins the simulations;
 there are no cross-specimen synapses in the extracted data. Wiring and contact
 counts are measured; neural dynamics, senses, body mechanics and behavior are
 models. Do not claim biologically calibrated walking from anatomical checks.
@@ -14,6 +16,7 @@ models. Do not claim biologically calibrated walking from anatomical checks.
 | `main.swift` | overlay scene, CLI modes, `SignalBuilder` (rates→commands), `Coordinator` (render-loop hub), `AppDelegate` (menu, timers, display switching) |
 | `FlyModel.swift` | `BodyForm` switch, procedural fly body + `Fly` behavior (states, gait, flight, ledges, sleep) |
 | `BeetleModel.swift` | procedural stag-beetle body — alternate skin for the same `FlyModel` contract |
+| `RoachModel.swift` | procedural American-cockroach body — third skin, tegmina driven via the elytra hooks |
 | `Sim.swift` | data loading, `BrainSignals`, `SpikeBus`, `LIFSim` (CSR network, stimulation API) |
 | `Locomotor.swift` | MaleCNS neural dynamics, homolog-rate input, leg-local sensory input, motor-channel output |
 | `LocomotorTests.swift` | causal checks of the actual MaleCNS → articulated body → sensory feedback loop |
@@ -28,15 +31,15 @@ models. Do not claim biologically calibrated walking from anatomical checks.
 
 ```sh
 ./build.sh                     # bare swiftc, -swift-version 5, no Xcode project
-./DesktopFly                   # menu-bar 🪰; quit from there
-./DesktopFly --simtest         # circuit invariants (MUST pass after sim/etl changes)
-./DesktopFly --behaviortest    # end-to-end sim→body checks (MUST pass after behavior changes)
-./DesktopFly --locomotortest   # active MaleCNS/body loop (MUST pass after shared motor changes)
-./DesktopFly --snapshot f.png  # offscreen body render (3/4 perspective)
-./DesktopFly --snapshot f.png --top [--flying] [--beetle]  # the app's own top-down
+./DesktopRoach                   # menu-bar 🪳; quit from there
+./DesktopRoach --simtest         # circuit invariants (MUST pass after sim/etl changes)
+./DesktopRoach --behaviortest    # end-to-end sim→body checks (MUST pass after behavior changes)
+./DesktopRoach --locomotortest   # active MaleCNS/body loop (MUST pass after shared motor changes)
+./DesktopRoach --snapshot f.png  # offscreen body render (3/4 perspective)
+./DesktopRoach --snapshot f.png --top [--flying] [--beetle] [--roach]  # top-down
                                # orthographic view — the only one users see
-./DesktopFly --brainshot b.png # offscreen brain render
-./DesktopFly --snapshot walk.png --top --walking # pose driven by active motor neurons
+./DesktopRoach --brainshot b.png # offscreen brain render
+./DesktopRoach --snapshot walk.png --top --walking # pose driven by active motor neurons
 ```
 
 Run **all three** suites after changes to simulation, extraction or behavior,
@@ -73,7 +76,8 @@ and `Fly.swapBody()` rebuilds it in place, keeping every behavior variable.
 - The beetle's hindwing outline is pre-rotated by `-side*0.13` to cancel the
   fixed fold `land()` applies, so folded wings stay tucked under the shell.
 - `--behaviortest` runs the whole grounded suite under the default form and
-  re-runs the gait/wingbeat checks under **both**.
+  re-runs the gait/wingbeat checks under **all three forms**, and the
+  wing-case flight check under beetle and roach.
 
 ## Threading model
 
@@ -216,10 +220,11 @@ dead corners of a non-rectangular layout.
 
 ## Repo conventions
 
-- Public repo: `DenisSergeevitch/desktop-fly` (master). Code MIT; original
+- Upstream: `DenisSergeevitch/desktop-fly` (master, untouched here). Code MIT; original
   FlyWire data CC BY-NC 4.0; MaleCNS data CC BY 4.0 — preserve the license split.
 - README numeric claims (neuron/edge/synapse counts, latencies) must match
   `data/*.json` and suite output — reviewers falsify them against the data.
 - `.gitignore` covers the binary, logs, and root-level PNGs (diagnostics
   outputs); intentional images live in `assets/`.
-- Local folder is `fly-brain`; the remote is `desktop-fly` — harmless.
+- Local folder is `desktop-roach`; no public remote yet — `git push` has nowhere
+  to go until one is added.

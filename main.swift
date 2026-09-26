@@ -1,13 +1,17 @@
-// DesktopFly — a 3D fruit fly that walks across your macOS desktop, driven by
-// REAL FlyWire v783 connectome data: a live LIF simulation of the escape
-// circuit (LC4/LPLC2 looming detectors -> DNp01 giant fiber), DNa02 steering
-// and MDN backward-walking neurons, with real signed synapse weights.
+// DesktopRoach — DesktopFly's brain driving a procedural American-cockroach
+// body. Same real FlyWire v783 escape-circuit LIF simulation (LC4/LPLC2
+// looming detectors -> DNp01 giant fiber, DNa02 steering, MDN backward walk)
+// and MaleCNS locomotor circuit; the fly / stag-beetle / cockroach bodies are
+// interchangeable skins over one `FlyModel` contract (see RoachModel.swift).
+//
+// Forked from desktop-fly at 32b0001 (v1.1.0) + its local color customizations;
+// that project is untouched.
 //
 // Build:  ./build.sh
-// Run:    ./DesktopFly                     (menu-bar 🪰; brain window shows live spikes)
-//         ./DesktopFly --snapshot out.png [--top] [--flying] [--beetle]  (offscreen body)
-//         ./DesktopFly --brainshot out.png (offscreen brain window render)
-//         ./DesktopFly --simtest           (headless circuit test: spontaneous + loom)
+// Run:    ./DesktopRoach                   (menu-bar 🪳; brain window shows live spikes)
+//         ./DesktopRoach --snapshot out.png [--top] [--flying] [--beetle] [--roach]  (offscreen body)
+//         ./DesktopRoach --brainshot out.png (offscreen brain window render)
+//         ./DesktopRoach --simtest           (headless circuit test: spontaneous + loom)
 
 import Cocoa
 import SceneKit
@@ -39,8 +43,9 @@ func buildScene(bounds: CGSize) -> SCNScene {
         key.shadowSampleCount = 8
     }
     let keyNode = SCNNode()
+    keyNode.name = "bodyKeyLight"
     keyNode.light = key
-    keyNode.eulerAngles = SCNVector3(-0.35, 0.30, 0)
+    keyNode.eulerAngles = SCNVector3(-0.35, BODY_FORM == .roach ? 0 : 0.30, 0)
     scene.rootNode.addChildNode(keyNode)
 
     let ambient = SCNLight()
@@ -80,11 +85,13 @@ func offscreenRender(_ scene: SCNScene, camNode: SCNNode, size: CGSize, path: St
 /// `topDown: true` reproduces the desktop overlay's own view — orthographic,
 /// straight down, same key light. That is the only view users actually see, so
 /// it is the one to check body geometry against.
-func runSnapshot(path: String, topDown: Bool = false, flying: Bool = false, walking: Bool = false) {
+func runSnapshot(path: String, topDown: Bool = false, flying: Bool = false, walking: Bool = false,
+                 brood: Bool = false) {
     let scene = SCNScene()
     scene.background.contents = NSColor(calibratedWhite: 0.94, alpha: 1)
     let fly = Fly(at: .zero)
     fly.heading = .pi / 2
+    if brood { fly.carryingDays = 0.5; fly.syncOotheca() }   // pose a carrying female
     if walking {
         guard let data = loadBrainData() else { fputs("missing/invalid brain data\n", stderr); exit(1) }
         let sim = LIFSim(circuit: data.circuit, spikeBus: nil, locomotorCircuit: data.locomotor)
@@ -110,8 +117,13 @@ func runSnapshot(path: String, topDown: Bool = false, flying: Bool = false, walk
         fly.heading = .pi / 2
     }
     for (i, leg) in fly.model.legs.enumerated() where !walking {
-        leg.angle = [0.25, -0.2, -0.22, 0.28, 0.2, -0.25][i]
-        leg.lift = [0.35, 0, 0, 0.3, 0, 0.35][i]
+        if BODY_FORM == .roach {
+            leg.angle = [0.18, 0.18, -0.12, -0.12, 0.10, 0.10][i]
+            leg.lift = [0.15, 0.15, 0, 0, 0.08, 0.08][i]
+        } else {
+            leg.angle = [0.25, -0.2, -0.22, 0.28, 0.2, -0.25][i]
+            leg.lift = [0.35, 0, 0, 0.3, 0, 0.35][i]
+        }
         leg.apply()
     }
     fly.syncNode()
@@ -136,7 +148,8 @@ func runSnapshot(path: String, topDown: Bool = false, flying: Bool = false, walk
     scene.rootNode.addChildNode(camNode)
     let key = SCNLight(); key.type = .directional; key.intensity = 1100
     let keyNode = SCNNode(); keyNode.light = key
-    keyNode.eulerAngles = topDown ? SCNVector3(-0.35, 0.30, 0) : SCNVector3(-0.9, 0.5, 0)
+    let lightYaw: CGFloat = BODY_FORM == .roach ? 0 : (topDown ? 0.30 : 0.5)
+    keyNode.eulerAngles = SCNVector3(topDown ? -0.35 : -0.9, lightYaw, 0)
     scene.rootNode.addChildNode(keyNode)
     let amb = SCNLight(); amb.type = .ambient; amb.intensity = 500
     let ambNode = SCNNode(); ambNode.light = amb
@@ -529,36 +542,38 @@ func runBehaviorTest() {
                            exact60 ? "yes" : "NO", fine, coarse, s60, s120))
     }
 
-    // ---- body form: stag beetle geometry (behavior layer untouched) ----
+    // ---- body form: stag-beetle / roach geometry (behavior layer untouched) ----
     let defaultForm = BODY_FORM
-    bodyCheck("beetle: elytra spread in flight and hold steady") {
-        BODY_FORM = .beetle
-        let fly = Fly(at: .zero)
-        guard let elytron = fly.model.elytraL, fly.model.elytraR != nil else {
-            return (false, "beetle model exposes no elytra")
-        }
-        fly.state = .idle
-        for _ in 0..<20 { fly.update(dt: dt, bounds: bounds, mouse: nil, signals: BrainSignals()) }
-        let closed = elytron.eulerAngles.z
-
-        fly.startFlight(bounds: bounds, effort: 0.8)
-        var open = closed, openDrive: CGFloat = 0
-        var lo = CGFloat.greatestFiniteMagnitude, hi = -CGFloat.greatestFiniteMagnitude
-        var sampled = 0, i = 0
-        while i < 40 && fly.state == .flying {
-            fly.update(dt: dt, bounds: bounds, mouse: nil, signals: BrainSignals())
-            if i >= 20 && fly.state == .flying {      // past the open-up transient
-                open = elytron.eulerAngles.z
-                openDrive = fly.elytraOpen
-                lo = min(lo, open); hi = max(hi, open); sampled += 1
+    for form in [BodyForm.beetle, BodyForm.roach] {
+        bodyCheck("[\(form.rawValue)] wing cases spread in flight and hold steady") {
+            BODY_FORM = form
+            let fly = Fly(at: .zero)
+            guard let elytron = fly.model.elytraL, fly.model.elytraR != nil else {
+                return (false, "\(form.rawValue) model exposes no wing cases")
             }
-            i += 1
+            fly.state = .idle
+            for _ in 0..<20 { fly.update(dt: dt, bounds: bounds, mouse: nil, signals: BrainSignals()) }
+            let closed = elytron.eulerAngles.z
+
+            fly.startFlight(bounds: bounds, effort: 0.8)
+            var open = closed, openDrive: CGFloat = 0
+            var lo = CGFloat.greatestFiniteMagnitude, hi = -CGFloat.greatestFiniteMagnitude
+            var sampled = 0, i = 0
+            while i < 40 && fly.state == .flying {
+                fly.update(dt: dt, bounds: bounds, mouse: nil, signals: BrainSignals())
+                if i >= 20 && fly.state == .flying {      // past the open-up transient
+                    open = elytron.eulerAngles.z
+                    openDrive = fly.elytraOpen
+                    lo = min(lo, open); hi = max(hi, open); sampled += 1
+                }
+                i += 1
+            }
+            // the elytra must sit at a steady open angle, NOT buzz with the 20 Hz wingbeat
+            let jitter = sampled > 1 ? hi - lo : 999
+            return (openDrive > 0.8 && abs(open - closed) > 0.3 && jitter < 0.05,
+                    String(format: "closed %.2f -> open %.2f rad, drive %.2f, jitter %.3f",
+                           closed, open, openDrive, jitter))
         }
-        // the elytra must sit at a steady open angle, NOT buzz with the 20 Hz wingbeat
-        let jitter = sampled > 1 ? hi - lo : 999
-        return (openDrive > 0.8 && abs(open - closed) > 0.3 && jitter < 0.05,
-                String(format: "closed %.2f -> open %.2f rad, drive %.2f, jitter %.3f",
-                       closed, open, openDrive, jitter))
     }
 
     bodyCheck("beetle: threat opens the elytra without takeoff") {
@@ -600,20 +615,112 @@ func runBehaviorTest() {
         holder.addChildNode(fly.node)
         let oldRoot = fly.node
 
-        BODY_FORM = .beetle
-        fly.swapBody()
+        for target in [BodyForm.beetle, BodyForm.roach] {
+            BODY_FORM = target
+            fly.swapBody()
 
-        let contract = fly.model.legs.count == 6
-            && fly.model.foldedWings.childNodes.count == 2
-            && fly.model.elytraL != nil && fly.model.elytraR != nil
-        let kept = fly.state == st && fly.speed == sp && fly.heading == hd && fly.pos == p
-        let reparented = fly.node !== oldRoot && oldRoot.parent == nil && fly.node.parent === holder
-        return (contract && kept && reparented && !flyHadElytra,
-                "contract=\(contract) state kept=\(kept) reparented=\(reparented) "
-                    + "fly form had elytra=\(flyHadElytra)")
+            let contract = fly.model.legs.count == 6
+                && fly.model.foldedWings.childNodes.count == 2
+                && fly.model.elytraL != nil && fly.model.elytraR != nil
+            let kept = fly.state == st && fly.speed == sp && fly.heading == hd && fly.pos == p
+            let reparented = fly.node !== oldRoot && oldRoot.parent == nil
+                && fly.node.parent === holder
+            if !(contract && kept && reparented && !flyHadElytra) {
+                return (false, "\(target.rawValue): contract=\(contract) state kept=\(kept) "
+                    + "reparented=\(reparented) fly form had elytra=\(flyHadElytra)")
+            }
+        }
+        return (true, "beetle + roach swaps kept state, position and the contract")
     }
 
-    for form in [BodyForm.fly, BodyForm.beetle] {
+    bodyCheck("roach: threat opens the tegmina without takeoff") {
+        BODY_FORM = .roach
+        var detail = "no attempt ran"
+        for _ in 0..<3 {
+            let fly = Fly(at: .zero)
+            guard let tegmen = fly.model.elytraL else { return (false, "no tegmina") }
+            fly.state = .walking; fly.speed = 20
+            fly.dartCooldown = 99
+            let closed = tegmen.eulerAngles.z
+            var threat = BrainSignals(); threat.wingDrive = 0.9; threat.walkDrive = 0.4
+            var tookOff = false
+            for _ in 0..<40 {
+                fly.update(dt: dt, bounds: bounds, mouse: nil, signals: threat)
+                if fly.state == .flying { tookOff = true; break }
+            }
+            detail = String(format: "open %.2f, tegmen %.2f -> %.2f rad%@",
+                            fly.elytraOpen, closed, tegmen.eulerAngles.z,
+                            tookOff ? " (spontaneous takeoff, retried)" : "")
+            if !tookOff && fly.elytraOpen > 0.5
+                && abs(tegmen.eulerAngles.z - closed) > 0.2 { return (true, detail) }
+        }
+        return (false, detail)
+    }
+
+    bodyCheck("body factory: 48 clones stay within a frame budget") {
+        BODY_FORM = .roach
+        let t0 = Date()
+        var models: [FlyModel] = []
+        for _ in 0..<48 { models.append(BodyFactory.instantiate(.roach)) }
+        let ms = Date().timeIntervalSince(t0) * 1000
+        let contract = models.allSatisfy { $0.legs.count == 6
+            && $0.foldedWings.childNodes.count == 2 && $0.elytraL != nil }
+        // the clones must share geometry: one master build, not 48
+        return (ms < 150 && contract,
+                String(format: "48 clones in %.0f ms, contract ok=%@", ms, contract ? "yes" : "NO"))
+    }
+
+    bodyCheck("size: explicit size scales the body; nymphs grow monotonically") {
+        let small = Fly(at: .zero, size: 0.5, adultTarget: 1.0)
+        let scaleOK = abs(small.node.scale.x - FLY_SCALE * 0.5) < 0.001
+        var monotonic = true
+        var last = small.sizeScale
+        small.ageDays = 85                     // jump near adulthood
+        for _ in 0..<20 {                      // a few ticks past maturity
+            small.update(dt: 0.2, bounds: bounds, mouse: nil, signals: BrainSignals())
+            if small.sizeScale < last - 1e-9 { monotonic = false }
+            last = small.sizeScale
+        }
+        let grownOK = small.sizeScale > 0.93 && small.sizeScale <= 1.0 + 1e-6
+        return (scaleOK && monotonic && grownOK,
+                String(format: "scale0=%@ monotonic=%@ size %.3f at ~86d",
+                       scaleOK ? "yes" : "NO", monotonic ? "yes" : "NO", small.sizeScale))
+    }
+
+    bodyCheck("breeding speed slider compresses the colony clock") {
+        let f = Fly(at: .zero, size: 0.5, adultTarget: 1.0)
+        let age0 = f.ageDays
+        RoachBreeding.speedMultiplier = 100
+        defer { RoachBreeding.speedMultiplier = 1 }   // other checks run at 1x
+        for _ in 0..<60 {                             // 12 s real
+            f.update(dt: 0.2, bounds: bounds, mouse: nil, signals: BrainSignals())
+        }
+        let gained = f.ageDays - age0                 // 12/(30/100) = 40 d at 100x
+        return (gained > 20 && gained < 60,
+                String(format: "age +%.1f d over 12 s real at 100x (expect ~40)", gained))
+    }
+
+    bodyCheck("breeding: ready adults court, carry, and plan a nymph brood") {
+        let a = Fly(at: .zero), b = Fly(at: CGPoint(x: 20, y: 0))
+        guard a.isAdult && b.isAdult else { return (false, "default roaches not adult") }
+        guard a.tryFertilize(b) else { return (false, "ready pair refused to mate") }
+        guard a.carryingDays >= 0 && a.carryingDays < RoachBreeding.oothecaDays,
+              b.carryingDays < 0 else { return (false, "no ootheca on one roach") }
+        guard !a.tryFertilize(b) else { return (false, "re-fertilized while carrying") }
+        b.state = .sleeping
+        let sleeper = Fly(at: .zero)
+        guard !sleeper.tryFertilize(b) else { return (false, "mated with a sleeper") }
+        a.carryingDays = RoachBreeding.oothecaDays + 1         // term exceeded
+        let brood = RoachBrood.planHatch(from: a)
+        let countOK = RoachBreeding.eggsRange.contains(brood.count)
+        let sizeOK = brood.allSatisfy { RoachBreeding.nymphSize.contains($0.size)
+            && $0.target > $0.size }
+        a.hatchDone()
+        return (countOK && sizeOK && a.carryingDays < 0,
+                "n=\(brood.count) in \(RoachBreeding.eggsRange), sizes ok=\(sizeOK)")
+    }
+
+    for form in [BodyForm.fly, BodyForm.beetle, BodyForm.roach] {
         bodyCheck("[\(form.rawValue)] gait advances and the wings still beat") {
             BODY_FORM = form
             let fly = Fly(at: .zero)
@@ -688,6 +795,49 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private let lock = NSLock()
     private var pending: [(Coordinator) -> Void] = []
 
+    /// Window-layer experiment: roach #1 (the brain carrier) lives on the
+    /// floating overlay; the colony can live down in the regular window
+    /// layers, where user windows cover and reveal them.
+    enum WindowLayerMode {
+        case topPetOnly       // default: #1 on the overlay, the rest in windows
+        case petsInWindows    // every roach inside the window layers
+        case alwaysOnTop      // the original floating-overlay behaviour
+    }
+    var layerMode: WindowLayerMode = .topPetOnly
+    let underScene: SCNScene
+
+    func sceneFor(_ index: Int) -> SCNScene {
+        switch layerMode {
+        case .alwaysOnTop: return scene
+        case .topPetOnly: return index == 0 ? scene : underScene
+        case .petsInWindows: return underScene
+        }
+    }
+
+    func rehomeAll() {
+        for (i, fly) in flies.enumerated() {
+            let target = sceneFor(i).rootNode
+            if fly.node.parent !== target {
+                fly.node.removeFromParentNode()
+                target.addChildNode(fly.node)
+            }
+        }
+        // the roach key light follows the body form in both scenes
+        let yaw: CGFloat = BODY_FORM == .roach ? 0 : 0.30
+        for scn in [scene, underScene] {
+            scn.rootNode.childNode(withName: "bodyKeyLight", recursively: false)?
+                .eulerAngles = SCNVector3(-0.35, yaw, 0)
+        }
+    }
+
+    func setLayerMode(_ mode: WindowLayerMode) {
+        enqueue { c in
+            guard c.layerMode != mode else { return }
+            c.layerMode = mode
+            c.rehomeAll()
+        }
+    }
+
     let sim: LIFSim?
     private let fpsLog = ProcessInfo.processInfo.environment["DESKTOPFLY_FPS"] != nil
     private var fpsFrames = 0
@@ -701,6 +851,23 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var mouseSampleDt: CGFloat = 0   // real time since that measurement
     private var loomOverride: CGFloat = 0
 
+    /// Main-thread snapshot for the menu status row (flies mutate on the
+    /// render thread; Int/CGFloat reads are torn-safe in practice, the pair
+    /// scan runs on whatever last state was committed).
+    func breedingStatus() -> (count: Int, nearest: CGFloat?, asleep: Int) {
+        lock.lock(); defer { lock.unlock() }
+        let n = flies.count
+        var nearest: CGFloat? = nil
+        var asleep = 0
+        for i in 0..<n { for j in (i + 1)..<n {
+            let dx = flies[i].pos.x - flies[j].pos.x, dy = flies[i].pos.y - flies[j].pos.y
+            let d = (dx * dx + dy * dy).squareRoot()
+            nearest = min(nearest ?? d, d)
+        }}
+        for f in flies where f.state == .sleeping { asleep += 1 }
+        return (n, nearest, asleep)
+    }
+
     // environment senses (written from main-thread timers, read in render loop)
     private var terrain: [Ledge] = []
     private var typingLevel: CGFloat = 0
@@ -711,12 +878,19 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var windowLoomR: Float = 0
     private(set) var lastFlyPos = CGPoint.zero
 
-    init(bounds: CGSize, sim: LIFSim?) {
+    init(bounds: CGSize, sim: LIFSim?, demoPair: Bool = false) {
         self.bounds = bounds
         self.sim = sim
         self.scene = buildScene(bounds: bounds)
+        self.underScene = buildScene(bounds: bounds)
         super.init()
         enqueue { $0.addFlyNow() }
+        if demoPair {
+            // breeding demo: a ready companion beside roach #1 and a fast
+            // colony clock, so the whole cycle plays out in about a minute
+            enqueue { $0.addFlyNow(); $0.addFlyNow() }
+            enqueue { _ in RoachBreeding.speedMultiplier = 20 }
+        }
     }
 
     func enqueue(_ action: @escaping (Coordinator) -> Void) {
@@ -724,13 +898,106 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     private func addFlyNow() {
-        let hw = bounds.width / 2 - 100, hh = bounds.height / 2 - 100
-        let fly = Fly(at: CGPoint(x: rnd(-hw...hw), y: rnd(-hh...hh)))
-        scene.rootNode.addChildNode(fly.node)
+        // roach #1 carries the brain and keeps the canonical size; every roach
+        // added later varies around it, as real colony members do
+        let size: CGFloat = flies.isEmpty ? 1.0 : rnd(0.65...1.4)
+        let pos: CGPoint
+        if let anchor = flies.randomElement()?.pos {
+            // land near an existing roach (straddling the courtship radius) —
+            // screen-wide random placement meant a fresh pair never met
+            let a = rnd(0...(2 * .pi)), r = rnd(40...75)
+            let hw = bounds.width / 2 - 60, hh = bounds.height / 2 - 60
+            pos = CGPoint(x: clampf(anchor.x + cos(a) * r, -hw, hw),
+                          y: clampf(anchor.y + sin(a) * r, -hh, hh))
+        } else {
+            let hw = bounds.width / 2 - 100, hh = bounds.height / 2 - 100
+            pos = CGPoint(x: rnd(-hw...hw), y: rnd(-hh...hh))
+        }
+        let fly = Fly(at: pos, size: size)
+        sceneFor(flies.count).rootNode.addChildNode(fly.node)
         flies.append(fly)
     }
 
     func addFly() { enqueue { $0.addFlyNow() } }
+    /// Colony breeding switch, toggled from the menu bar; on by default.
+    var breedingOn = true
+    func setBreeding(_ on: Bool) { enqueue { $0.breedingOn = on } }
+    func setBreedingSpeed(_ v: CGFloat) {
+        enqueue { _ in RoachBreeding.speedMultiplier = max(1, v) }
+    }
+    func setColonyCap(_ v: Int) {
+        enqueue { _ in RoachBreeding.colonyCap = max(2, v) }
+    }
+    /// Debug/test lever: fertilize the closest ready pair regardless of the
+    /// sleep gate (the circadian night puts every roach to sleep, which would
+    /// otherwise block courtship for hours of real time).
+    func forceMating() {
+        enqueue { c in
+            let ready = c.flies.filter { $0.isAdult && $0.carryingDays < 0 }
+            guard ready.count >= 2 else { return }
+            var best: (Int, Int, CGFloat)?
+            for i in 0..<ready.count {
+                for j in (i + 1)..<ready.count {
+                    let dx = ready[i].pos.x - ready[j].pos.x, dy = ready[i].pos.y - ready[j].pos.y
+                    let d = (dx * dx + dy * dy).squareRoot()
+                    if best == nil || d < best!.2 { best = (i, j, d) }
+                }
+            }
+            guard let (i, j, d) = best else { return }
+            ready[i].carryingDays = 0
+            ready[i].broodCooldownDays = RoachBreeding.intervalDays
+            ready[j].broodCooldownDays = RoachBreeding.intervalDays * 0.5
+            fputs("[breed] forced pair, dist \(Int(d))\n", stderr)
+        }
+    }
+    /// Per-tick colony dynamics: hatch carried oothecae past their term, then
+    /// let nearby ready adults court. Everything below RoachBreeding's cap.
+    private var breedLogAccum: CGFloat = 0
+    private func breedingTick(_ dt: CGFloat) {
+        guard breedingOn else { return }
+        breedLogAccum += dt
+        if breedLogAccum >= 5 {
+            breedLogAccum = 0
+            var nearest: CGFloat?
+            for i in 0..<flies.count { for j in (i + 1)..<flies.count {
+                let dx = flies[i].pos.x - flies[j].pos.x, dy = flies[i].pos.y - flies[j].pos.y
+                nearest = min(nearest ?? .greatestFiniteMagnitude, (dx * dx + dy * dy).squareRoot())
+            }}
+            let states = flies.map { String(describing: $0.state).replacingOccurrences(of: "DesktopRoach.Fly.State.", with: "") }.joined(separator: ",")
+            fputs(String(format: "[breed] n=%d canMate=%d nearest=%.0f speed=%.0f states=[%@]\n",
+                         flies.count, flies.filter(\.canMate).count,
+                         nearest ?? -1, RoachBreeding.speedMultiplier, states), stderr)
+        }
+        var mothers: [Fly] = []
+        for fly in flies where fly.carryingDays >= RoachBreeding.oothecaDays {
+            mothers.append(fly)
+        }
+        for mother in mothers {
+            for (p, size, target) in RoachBrood.planHatch(from: mother) {
+                guard flies.count < RoachBreeding.colonyCap else { break }
+                let nymph = Fly(at: p, size: size, adultTarget: target)
+                sceneFor(flies.count).rootNode.addChildNode(nymph.node)
+                flies.append(nymph)
+            }
+            fputs("[breed] hatched, colony now \(flies.count)\n", stderr)
+            mother.hatchDone()
+        }
+        guard flies.count < RoachBreeding.colonyCap else { return }
+        for i in flies.indices where flies[i].canMate {
+            var mated = false
+            for j in (i + 1)..<flies.count where flies[j].canMate {
+                let dx = flies[i].pos.x - flies[j].pos.x, dy = flies[i].pos.y - flies[j].pos.y
+                if dx * dx + dy * dy < RoachBreeding.pairDistance * RoachBreeding.pairDistance,
+                   rnd(0...1) < min(1, RoachBreeding.chancePerSecond * RoachBreeding.speedMultiplier * dt),
+                   flies[i].tryFertilize(flies[j]) {
+                    mated = true
+                    fputs("[breed] mated #\(i)-#\(j)\n", stderr)
+                    break
+                }
+            }
+            if mated { break }   // one courtship event per tick keeps the cadence readable
+        }
+    }
     func removeFly() {
         enqueue { c in
             guard c.flies.count > 1 else { return }   // fly #1 carries the brain
@@ -751,6 +1018,11 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             guard BODY_FORM != form else { return }
             BODY_FORM = form
             for fly in c.flies { fly.swapBody() }
+            let yaw: CGFloat = form == .roach ? 0 : 0.30
+            for scn in [c.scene, c.underScene] {
+                scn.rootNode.childNode(withName: "bodyKeyLight", recursively: false)?
+                    .eulerAngles = SCNVector3(-0.35, yaw, 0)
+            }
         }
     }
     func setMouse(_ p: CGPoint?) { lock.lock(); mouseScene = p; lock.unlock() }
@@ -909,6 +1181,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             fly.terrain = terrain
             fly.update(dt: dt, bounds: bounds, mouse: mouse, signals: i == 0 ? signals : nil)
         }
+        breedingTick(dt)
         if let first = flies.first {
             lock.lock(); lastFlyPos = first.pos; lock.unlock()
         }
@@ -919,12 +1192,33 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
+        // Titles are assigned ONLY when they actually change: rewriting an
+        // item's title while the menu is open forces a relayout that can
+        // re-enter this callback and stall the main thread (the frozen
+        // slider). The status itself is precomputed on the 0.7 s timer.
+        guard let s = lastBreedingStatus else { return }
+        if let item = breedingItem, coordinator.breedingOn {
+            let t = "Breeding: On (\(s.count) roaches)"
+            if item.title != t { item.title = t }
+            let status = s.nearest == nil ? "no pair yet"
+                : String(format: "nearest pair %.0f pt (mate <%.0f) · %d asleep",
+                         s.nearest!, RoachBreeding.pairDistance, s.asleep)
+            if let st = breedingStatusItem, st.title != status { st.title = status }
+        } else if let item = breedingItem {
+            if item.title != "Breeding: Off" { item.title = "Breeding: Off" }
+            if let st = breedingStatusItem, st.title != "colony paused" { st.title = "colony paused" }
+        }
         // only offer the display hop when there is somewhere to hop to
         moveDisplayItem?.isHidden = NSScreen.screens.count < 2
     }
 
     var window: NSWindow!
     var scnView: SCNView!
+    var underWindow: NSWindow!
+    var underView: SCNView!
+    var lastFrontWindowNumber: Int = -1
+    var crawlDescendWork: DispatchWorkItem?
+    var lastBreedingStatus: (count: Int, nearest: CGFloat?, asleep: Int)?
     var coordinator: Coordinator!
     var statusItem: NSStatusItem!
     var mouseTimer: Timer?
@@ -940,6 +1234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var brainFullscreenItem: NSMenuItem?
     var brainHintItem: NSMenuItem?
     var bodyItem: NSMenuItem?
+    var breedingItem: NSMenuItem?
     var requestedBody: BodyForm = BODY_FORM
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -957,7 +1252,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 + " · MaleCNS \(data.locomotor.neurons.count)n/\(data.locomotor.edges.count)e"
         }
 
-        coordinator = Coordinator(bounds: frame.size, sim: sim)
+        coordinator = Coordinator(bounds: frame.size, sim: sim,
+                                  demoPair: args.contains("--demo-pair"))
 
         window = NSWindow(contentRect: frame, styleMask: [.borderless],
                           backing: .buffered, defer: false)
@@ -982,10 +1278,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.contentView = scnView
         window.orderFrontRegardless()
 
+        // the window-layer overlay: same clear click-through scene, but at
+        // .normal level so user windows cover and reveal the colony
+        underWindow = NSWindow(contentRect: frame, styleMask: [.borderless],
+                               backing: .buffered, defer: false)
+        underWindow.isOpaque = false
+        underWindow.backgroundColor = .clear
+        underWindow.hasShadow = false
+        underWindow.level = .normal
+        underWindow.ignoresMouseEvents = true
+        underWindow.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+        underView = SCNView(frame: NSRect(origin: .zero, size: frame.size))
+        underView.scene = coordinator.underScene
+        underView.backgroundColor = .clear
+        underView.antialiasingMode = .multisampling4X
+        underView.preferredFramesPerSecond = 60
+        underView.isPlaying = true
+        underWindow.contentView = underView
+        underWindow.orderFrontRegardless()
+
         if let sim = sim, let pts = brainPoints {
             let wc = BrainWindowController(points: pts, sim: sim, screen: screen)
             wc.onFullscreenChange = { [weak self] in self?.syncFullscreenItem() }
-            wc.show()
+            // hidden until "Show/Hide Brain" — the spike wall is a lot on
+            // first launch
             brainWC = wc
         }
 
@@ -1012,6 +1328,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // window terrain + new-window looms, ~1.4 Hz
         windowTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
             guard let self else { return }
+            lastBreedingStatus = coordinator.breedingStatus()
+            pollFrontWindow()
             let snap = self.windowSense.poll(screen: self.screenFrame)
             self.coordinator.setTerrain(snap.ledges)
             let flyPos = self.coordinator.flyPosition()
@@ -1048,6 +1366,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         screenFrame = screen.frame
         window.setFrame(screen.frame, display: true)
         scnView.frame = NSRect(origin: .zero, size: screen.frame.size)
+        underWindow?.setFrame(screen.frame, display: true)
+        underView?.frame = NSRect(origin: .zero, size: screen.frame.size)
         coordinator.retarget(size: screen.frame.size)
         brainWC?.move(to: screen)
     }
@@ -1059,11 +1379,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         move(to: screens[(idx + 1) % screens.count])
     }
 
+    /// The frontmost regular (layer-0) window that is not ours. When it
+    /// changes — the user clicked or switched to another window — the colony
+    /// overlay crawls UP above all regular windows for two seconds (the pets
+    /// wander across the newly revealed surface), then sinks back beneath
+    /// them; the window actually in use stays on top of them.
+    func pollFrontWindow() {
+        guard coordinator.layerMode != .alwaysOnTop, let under = underWindow else { return }
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                              kCGNullWindowID) as? [[String: Any]] ?? []
+        let pid = ProcessInfo.processInfo.processIdentifier
+        for w in list {
+            guard (w[kCGWindowLayer as String] as? Int ?? 0) == 0 else { continue }   // front-to-back order
+            if (w[kCGWindowOwnerPID as String] as? Int ?? 0) == pid { continue }      // skip our own overlays
+            let num = w[kCGWindowNumber as String] as? Int ?? -1
+            if num != lastFrontWindowNumber {
+                let first = lastFrontWindowNumber == -1
+                lastFrontWindowNumber = num
+                if !first { crawlOnFocusChange() }
+            }
+            break   // only the topmost non-self regular window matters
+        }
+    }
+
+    func crawlOnFocusChange() {
+        guard let under = underWindow else { return }
+        crawlDescendWork?.cancel()
+        under.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue - 1)
+        under.orderFrontRegardless()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let under = self.underWindow else { return }
+            under.level = .normal
+            under.orderBack(nil)   // sink beneath every regular window again
+        }
+        crawlDescendWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: work)
+    }
+
     func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "🪰"
+        statusItem.button?.title = "🪳"
         let menu = NSMenu()
-        menu.addItem(withTitle: "Desktop Fly", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "Desktop Roach", action: nil, keyEquivalent: "")
         menu.addItem(withTitle: dataInfo, action: nil, keyEquivalent: "")
         menu.addItem(.separator())
         func item(_ title: String, _ sel: Selector, _ key: String) -> NSMenuItem {
@@ -1084,9 +1441,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(move)
         moveDisplayItem = move
         menu.delegate = self
-        menu.addItem(item("Add Fly", #selector(addFly), "a"))
-        menu.addItem(item("Remove Fly", #selector(removeFly), "r"))
-        menu.addItem(item("Scare Flies", #selector(scareAll), "s"))
+        menu.addItem(item("Add Pet", #selector(addFly), "a"))
+        menu.addItem(item("Remove Pet", #selector(removeFly), "r"))
+        menu.addItem(item("Scare Pets", #selector(scareAll), "s"))
+        let breeding = item("Breeding: On", #selector(toggleBreeding), "b")
+        breedingItem = breeding
+        menu.addItem(breeding)
+        // sliders hosted inside the menu. Frame layout on purpose: menu item
+        // views have no auto-layout pass, a stack view here collapsed to zero
+        // height and the slider was invisible.
+        let speedRow = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 22))
+        let speedLabel = NSTextField(labelWithString: "Speed ×1")
+        speedLabel.font = NSFont.menuFont(ofSize: 0)
+        speedLabel.frame = NSRect(x: 14, y: 4, width: 112, height: 15)
+        breedingSpeedLabel = speedLabel
+        let speedSlider = NSSlider(value: 1, minValue: 1, maxValue: 100,
+                                   target: self, action: #selector(breedingSpeedChanged(_:)))
+        speedSlider.isContinuous = true
+        speedSlider.frame = NSRect(x: 130, y: 3, width: 140, height: 18)
+        speedRow.addSubview(speedLabel)
+        speedRow.addSubview(speedSlider)
+        let speedItem = NSMenuItem()
+        speedItem.view = speedRow
+        menu.addItem(speedItem)
+
+        let capRow = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 22))
+        let capLabel = NSTextField(labelWithString: "Colony cap: 48")
+        capLabel.font = NSFont.menuFont(ofSize: 0)
+        capLabel.frame = NSRect(x: 14, y: 4, width: 112, height: 15)
+        colonyCapLabel = capLabel
+        let capSlider = NSSlider(value: 48, minValue: 2, maxValue: 200,
+                                 target: self, action: #selector(colonyCapChanged(_:)))
+        capSlider.isContinuous = true
+        capSlider.frame = NSRect(x: 130, y: 3, width: 140, height: 18)
+        capRow.addSubview(capLabel)
+        capRow.addSubview(capSlider)
+        let capItem = NSMenuItem()
+        capItem.view = capRow
+        menu.addItem(capItem)
+        // where the pets live: overlay vs window layers
+        let layerMenu = NSMenu()
+        layerMenu.addItem(withTitle: "Top Pet Only", action: #selector(layerTopPetOnly), keyEquivalent: "")
+        layerMenu.addItem(withTitle: "Pets in Windows", action: #selector(layerPetsInWindows), keyEquivalent: "")
+        layerMenu.addItem(withTitle: "All Always On Top", action: #selector(layerAlwaysOnTop), keyEquivalent: "")
+        for it in layerMenu.items { it.target = self }
+        layerMenu.items[0].state = NSControl.StateValue.on
+        layerSubmenu = layerMenu
+        let layerItem = NSMenuItem(title: "Window Layer", action: nil, keyEquivalent: "")
+        layerItem.submenu = layerMenu
+        menu.addItem(layerItem)
+        let status = NSMenuItem(title: "no pair yet", action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        breedingStatusItem = status
+        menu.addItem(status)
+        menu.addItem(item("Introduce Pair", #selector(forceMating), ""))
         let body = item("Body: Fruit Fly", #selector(toggleBody), "y")
         bodyItem = body
         menu.addItem(body)
@@ -1121,19 +1529,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         brainFullscreenItem?.title = wc.isFullscreen ? "Exit Fullscreen Brain" : "Fullscreen Brain"
     }
     @objc func escapeTest() { coordinator.escapeTest() }
+    @objc func forceMating() { coordinator.forceMating() }
+    @objc func toggleBreeding() {
+        coordinator.setBreeding(!coordinator.breedingOn)
+        breedingItem?.title = "Breeding: \(coordinator.breedingOn ? "On" : "Off")"
+    }
+    var breedingSpeedLabel: NSTextField?
+    var colonyCapLabel: NSTextField?
+    var breedingStatusItem: NSMenuItem?
+    var layerSubmenu: NSMenu?
+    @objc func breedingSpeedChanged(_ sender: NSSlider) {
+        let v = sender.doubleValue
+        coordinator.setBreedingSpeed(CGFloat(v))
+        breedingSpeedLabel?.stringValue = String(format: "Speed ×%.0f", v)
+    }
+    @objc func layerTopPetOnly() { setLayerMode(.topPetOnly) }
+    @objc func layerPetsInWindows() { setLayerMode(.petsInWindows) }
+    @objc func layerAlwaysOnTop() { setLayerMode(.alwaysOnTop) }
+    private func setLayerMode(_ mode: Coordinator.WindowLayerMode) {
+        coordinator.setLayerMode(mode)
+        syncLayerMenu()
+    }
+    private func syncLayerMenu() {
+        guard let layerMenu = layerSubmenu else { return }
+        let states: [NSControl.StateValue] = [
+            coordinator.layerMode == .topPetOnly ? .on : .off,
+            coordinator.layerMode == .petsInWindows ? .on : .off,
+            coordinator.layerMode == .alwaysOnTop ? .on : .off,
+        ]
+        for (i, it) in layerMenu.items.enumerated() { it.state = states[i] }
+    }
+    @objc func colonyCapChanged(_ sender: NSSlider) {
+        let v = Int(sender.doubleValue)
+        coordinator.setColonyCap(v)
+        colonyCapLabel?.stringValue = "Colony cap: \(v)"
+    }
     @objc func addFly() { coordinator.addFly() }
     @objc func removeFly() { coordinator.removeFly() }
     @objc func scareAll() { coordinator.scareAll() }
     @objc func toggleBody() {
         // BODY_FORM itself is only ever mutated on the render thread (see the
         // threading model); the menu tracks what it asked for, for the label.
-        requestedBody = requestedBody == .beetle ? .fly : .beetle
+        requestedBody = nextForm(requestedBody)
         coordinator.setBodyForm(requestedBody)
         refreshBodyItem()
     }
     private func refreshBodyItem() {
-        // the item offers the OTHER form, so it reads as an action
-        bodyItem?.title = requestedBody == .beetle ? "Body: Fruit Fly" : "Body: Stag Beetle"
+        // the item offers the NEXT form, so it reads as an action
+        bodyItem?.title = "Body: " + bodyName(nextForm(requestedBody))
     }
 }
 
@@ -1142,8 +1585,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 let args = CommandLine.arguments
 if let i = args.firstIndex(of: "--snapshot") {
     if args.contains("--beetle") { BODY_FORM = .beetle }
+    if args.contains("--roach") { BODY_FORM = .roach }  // after --beetle, so --roach wins if both are given
     runSnapshot(path: args.count > i + 1 ? args[i + 1] : "preview.png",
-                topDown: args.contains("--top"), flying: args.contains("--flying"), walking: args.contains("--walking"))
+                topDown: args.contains("--top"), flying: args.contains("--flying"),
+                walking: args.contains("--walking"), brood: args.contains("--brood"))
     exit(0)
 }
 if let i = args.firstIndex(of: "--brainshot") {
