@@ -9,7 +9,8 @@
     "simtest": "node test/simtest.js",
     "behaviortest": "node test/behaviortest.js",
     "test": "node test/simtest.js && node test/behaviortest.js && node test/locomotortest.js",
-    "locomotortest": "node test/locomotortest.js"
+    "locomotortest": "node test/locomotortest.js",
+    "snapshot": "electron tools/snapshot.mjs"
   },
   "license": "MIT",
   "dependencies": {

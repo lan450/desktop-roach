@@ -199,14 +199,32 @@ See `data/LOCOMOTOR_PROVENANCE.md` for the full source and modeling contract.
 
 ## Windows port (`windows/`)
 
-An Electron + three.js port lives in `windows/`. `Sim.swift` and
-`FlyModel.swift` are ported to `windows/src/sim.js` and
-`windows/src/flymodel.js`. `Locomotor.swift` and `LegDynamics.swift` have matching
+An Electron + three.js port lives in `windows/`. `Sim.swift`,
+`FlyModel.swift` (behavior, forms, colony) and `RoachModel.swift` are ported
+to `windows/src/sim.js`, `windows/src/flymodel.js` and
+`windows/src/roachmodel.js`. `Locomotor.swift` and `LegDynamics.swift` have matching
 `windows/src/locomotor.js` and `windows/src/legdynamics.js` implementations.
 All three suites are mirrored (`npm run simtest`, `npm run behaviortest`,
 `npm run locomotortest` — corresponding invariants).
 **Any change to the sim or to behavior must be mirrored there and `npm test`
 re-run**, otherwise the two platforms drift apart silently.
+
+Port-specific gotchas, learned the hard way:
+- The boot form is the roach on both platforms. The stag beetle is macOS-only;
+  it slots into `windows/src/flymodel.js` `BODY_FORM_CYCLE` when ported.
+- three.js draws from `Math.random` inside geometry constructors and once per
+  `Object3D` node (UUIDs), unlike SceneKit. `BodyFactory` routes template
+  builds and clones through `withoutSharedRandom` so the seeded streams the
+  behavior tests rely on stay purely behavioral; `warmBodyTemplates()` must
+  run before the first `resetRandom` in a suite.
+- The locomotor mechanics baseline is the fruit-fly leg set on both platforms
+  (`evaluateLocomotor` hardcodes `buildFlyModel()`); do not point it at the
+  boot form.
+- The tray menu cannot host sliders like NSMenu views; colony controls are
+  radio submenus plus a status row fed by the renderer's `colony-status` IPC.
+- `npm run snapshot` is the offscreen body render counterpart of
+  `--snapshot`; the renderer ships its own canvas pixels (`toDataURL`)
+  because offscreen painting drops the composited WebGL layer.
 
 The rendering and OS layers are rewrites, not ports: SceneKit -> three.js,
 NSPanel -> transparent `BrowserWindow`, `CGWindowList` -> `EnumWindows` via

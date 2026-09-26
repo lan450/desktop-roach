@@ -7,7 +7,8 @@
 import * as THREE from '../node_modules/three/build/three.module.js';
 import { LIFSim, SpikeBus, SimulationClock } from '../src/sim.js';
 import { SignalBuilder } from '../src/signals.js';
-import { Fly, SHADOWS_ENABLED } from '../src/flymodel.js';
+import { Fly, RoachBreeding, RoachBrood, setBodyForm, getBodyForm, warmBodyTemplates,
+  SHADOWS_ENABLED } from '../src/flymodel.js';
 import { clampf, rnd, lag } from '../src/util.js';
 
 const api = window.flyAPI;
@@ -27,8 +28,20 @@ camera.position.set(0, 0, 300);
 // side, aiming at the origin.
 // SceneKit used 1000 lm key / 550 lm ambient; three.js light units differ,
 // so these are the equivalents that keep highlights from clipping to white.
+// SceneKit aims the key light through keyNode.eulerAngles = (-0.35, yaw, 0),
+// where the yaw is 0 for the roach and 0.30 for the other forms (main.swift).
+// The positions below place three.js's light on the opposite side of that
+// aim, per form — wrong yaw drags a broad specular band across the shell in
+// the top-down view desktop users actually see.
+function keyLightPositionFor(form) {
+  return form === 'roach'
+    ? { x: 0, y: 0.3429 * 900, z: 0.9394 * 900 }
+    : { x: 0.2955 * 900, y: 0.3276 * 900, z: 0.8974 * 900 };
+}
+
 const key = new THREE.DirectionalLight(0xffffff, 1.5);
-key.position.set(0.2955 * 900, 0.3276 * 900, 0.8974 * 900);
+const bootKey = keyLightPositionFor(getBodyForm());
+key.position.set(bootKey.x, bootKey.y, bootKey.z);
 key.target.position.set(0, 0, 0);
 scene.add(key.target);
 if (SHADOWS_ENABLED) {
@@ -103,13 +116,32 @@ let activity = 1;
 let windowLoomL = 0;
 let windowLoomR = 0;
 
+// Colony breeding switch, toggled from the tray; on by default.
+let breedingOn = true;
+let breedLogAccum = 0;
+let statusAccum = 0;
+
 function addFly() {
-  const hw = bounds.width / 2 - 100, hh = bounds.height / 2 - 100;
-  let p = { x: rnd(-hw, hw), y: rnd(-hh, hh) };
-  for (let k = 0; k < 24 && screens && !onAnyScreen(p.x, p.y, 60); k++) {
+  // roach #1 carries the brain and keeps the canonical size; every roach
+  // added later varies around it, as real colony members do
+  const size = flies.length === 0 ? 1.0 : rnd(0.65, 1.4);
+  let p;
+  if (flies.length > 0) {
+    // land near an existing roach (straddling the courtship radius) —
+    // screen-wide random placement meant a fresh pair never met
+    const anchor = flies[Math.floor(Math.random() * flies.length)].pos;
+    const a = rnd(0, 2 * Math.PI), r = rnd(40, 75);
+    const hw = bounds.width / 2 - 60, hh = bounds.height / 2 - 60;
+    p = { x: clampf(anchor.x + Math.cos(a) * r, -hw, hw),
+          y: clampf(anchor.y + Math.sin(a) * r, -hh, hh) };
+  } else {
+    const hw = bounds.width / 2 - 100, hh = bounds.height / 2 - 100;
     p = { x: rnd(-hw, hw), y: rnd(-hh, hh) };
+    for (let k = 0; k < 24 && screens && !onAnyScreen(p.x, p.y, 60); k++) {
+      p = { x: rnd(-hw, hw), y: rnd(-hh, hh) };
+    }
   }
-  const fly = new Fly(p);
+  const fly = new Fly(p, size);
   fly.screens = screens;
   scene.add(fly.node);
   flies.push(fly);
@@ -162,6 +194,103 @@ function removeFly() {
   if (flies.length <= 1) return;          // fly #1 carries the brain
   const fly = flies.pop();
   scene.remove(fly.node);
+}
+
+// Debug/test lever: fertilize the closest ready pair regardless of the sleep
+// gate (the circadian night puts every roach to sleep, which would otherwise
+// block courtship for hours of real time).
+function forceMating() {
+  const ready = flies.filter((fly) => fly.isAdult && fly.carryingDays < 0);
+  if (ready.length < 2) return;
+  let best = null;
+  for (let i = 0; i < ready.length; i++) {
+    for (let j = i + 1; j < ready.length; j++) {
+      const d = Math.hypot(ready[i].pos.x - ready[j].pos.x,
+        ready[i].pos.y - ready[j].pos.y);
+      if (best === null || d < best.d) best = { i, j, d };
+    }
+  }
+  ready[best.i].carryingDays = 0;
+  ready[best.i].broodCooldownDays = RoachBreeding.intervalDays;
+  ready[best.j].broodCooldownDays = RoachBreeding.intervalDays * 0.5;
+  console.info(`[breed] forced pair, dist ${Math.trunc(best.d)}`);
+}
+
+// Per-tick colony dynamics: hatch carried oothecae past their term, then
+// let nearby ready adults court. Everything below RoachBreeding's cap.
+function breedingTick(dt) {
+  if (!breedingOn) return;
+  breedLogAccum += dt;
+  statusAccum += dt;
+  if (breedLogAccum >= 5) {
+    breedLogAccum = 0;
+    let nearest;
+    for (let i = 0; i < flies.length; i++) {
+      for (let j = i + 1; j < flies.length; j++) {
+        const d = Math.hypot(flies[i].pos.x - flies[j].pos.x,
+          flies[i].pos.y - flies[j].pos.y);
+        nearest = Math.min(nearest ?? Infinity, d);
+      }
+    }
+    console.info(`[breed] n=${flies.length} `
+      + `canMate=${flies.filter((fly) => fly.canMate).length} `
+      + `nearest=${nearest === undefined ? -1 : Math.round(nearest)} `
+      + `speed=${Math.round(RoachBreeding.speedMultiplier)} `
+      + `states=[${flies.map((fly) => fly.state).join(',')}]`);
+  }
+  // the tray status row reads even while the colony is paused
+  if (statusAccum >= 5) {
+    statusAccum = 0;
+    let nearest;
+    for (let i = 0; i < flies.length; i++) {
+      for (let j = i + 1; j < flies.length; j++) {
+        const d = Math.hypot(flies[i].pos.x - flies[j].pos.x,
+          flies[i].pos.y - flies[j].pos.y);
+        nearest = Math.min(nearest ?? Infinity, d);
+      }
+    }
+    api.sendColonyStatus({
+      count: flies.length,
+      canMate: flies.filter((fly) => fly.canMate).length,
+      nearest: nearest === undefined ? -1 : Math.round(nearest),
+      asleep: flies.filter((fly) => fly.state === 'sleeping').length,
+      speed: Math.round(RoachBreeding.speedMultiplier),
+      cap: RoachBreeding.colonyCap,
+    });
+  }
+  // At the cap, hatching is skipped and the mother's ootheca is discarded
+  // (she still gets the rest cooldown) — the same decision breedingTick makes
+  // in main.swift; the colony simply stops growing.
+  const mothers = flies.filter((fly) => fly.carryingDays >= RoachBreeding.oothecaDays);
+  for (const mother of mothers) {
+    for (const brood of RoachBrood.planHatch(mother)) {
+      if (flies.length >= RoachBreeding.colonyCap) break;
+      const nymph = new Fly(brood.pos, brood.size, brood.target);
+      nymph.screens = screens;
+      scene.add(nymph.node);
+      flies.push(nymph);
+    }
+    console.info(`[breed] hatched, colony now ${flies.length}`);
+    mother.hatchDone();
+  }
+  if (flies.length >= RoachBreeding.colonyCap) return;
+  for (let i = 0; i < flies.length; i++) {
+    if (!flies[i].canMate) continue;
+    let mated = false;
+    for (let j = i + 1; j < flies.length; j++) {
+      if (!flies[j].canMate) continue;
+      const dx = flies[i].pos.x - flies[j].pos.x, dy = flies[i].pos.y - flies[j].pos.y;
+      if (dx * dx + dy * dy < RoachBreeding.pairDistance * RoachBreeding.pairDistance
+        && rnd(0, 1) < Math.min(1, RoachBreeding.chancePerSecond
+          * RoachBreeding.speedMultiplier * dt)
+        && flies[i].tryFertilize(flies[j])) {
+        mated = true;
+        console.info(`[breed] mated #${i}-#${j}`);
+        break;
+      }
+    }
+    if (mated) break;   // one courtship event per tick keeps the cadence readable
+  }
 }
 
 function scareAll() {
@@ -291,6 +420,7 @@ function tick(dt) {
     flies[i].update(dt, bounds, mouseScene, i === 0 ? signals : null);
   }
 
+  breedingTick(dt);
 }
 
 // ---- wiring ----
@@ -330,6 +460,19 @@ api.onCommand((c) => {
     case 'scareAll': scareAll(); break;
     case 'flyToNextDisplay': flyToNextDisplay(); break;
     case 'stim': stimulateGroup(c.group); break;
+    case 'setBodyForm':
+      if (getBodyForm() === c.value) break;   // main.swift guards the same way
+      setBodyForm(c.value);
+      {
+        const p = keyLightPositionFor(c.value);
+        key.position.set(p.x, p.y, p.z);
+      }
+      for (const fly of flies) fly.swapBody();
+      break;
+    case 'setBreeding': breedingOn = c.value; break;
+    case 'setBreedingSpeed': RoachBreeding.speedMultiplier = Math.max(1, c.value); break;
+    case 'setColonyCap': RoachBreeding.colonyCap = Math.max(2, c.value); break;
+    case 'forceMating': forceMating(); break;
     default: break;
   }
 });
@@ -370,6 +513,7 @@ api.onStimulate((req) => {
   } else {
     console.warn('no data/ — the fly falls back to legacy distance-based behavior');
   }
+  warmBodyTemplates();
   addFly();
   requestAnimationFrame(frame);
 })();

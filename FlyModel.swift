@@ -29,8 +29,10 @@ enum RoachBreeding {
     static let nymphSize: ClosedRange<CGFloat> = 0.38...0.52
     static let adultSize: ClosedRange<CGFloat> = 0.8...1.25
     static let eggsRange = 6...9              // nymphs per ootheca, sim-friendly
-    /// Hard cap on the colony, user-settable from the menu slider. Each roach
-    /// builds its own mesh (~30 k vertices), so this is the memory guard.
+    /// Hard cap on the colony, user-settable from the menu slider. Bodies share
+    /// geometry through the template factory, so the cost per roach is scene
+    /// nodes + per-tick behavior, not a private mesh — the cap keeps both
+    /// bounded (the 200 stop is the practical frame-budget ceiling).
     static var colonyCap = 48
     static let pairDistance: CGFloat = 70     // courtship proximity, desktop pt
     static let chancePerSecond: CGFloat = 0.2 // when a ready pair is close
@@ -686,7 +688,11 @@ final class Fly {
         let carrying = carryingDays >= 0
         if carrying && ootheca == nil { ootheca = buildOotheca() }
         guard let caseNode = ootheca else { return }
-        if caseNode.parent == nil && carrying { model.root.addChildNode(caseNode) }
+        // Reparent whenever the case is not on the current body root: after a
+        // body swap it still hangs on the discarded root (whose own parent is
+        // nil), so a nil-parent test would silently lose a carrying female's
+        // brood across every form change.
+        if caseNode.parent !== model.root && carrying { model.root.addChildNode(caseNode) }
         caseNode.isHidden = !carrying
     }
 
@@ -702,9 +708,10 @@ final class Fly {
     func tryFertilize(_ partner: Fly) -> Bool {
         guard canMate && partner.canMate else { return false }
         let mother = rnd(0...1) < 0.5 ? self : partner
+        let mate = mother === self ? partner : self
         mother.carryingDays = 0
         mother.broodCooldownDays = RoachBreeding.intervalDays
-        partner.broodCooldownDays = RoachBreeding.intervalDays * 0.5
+        mate.broodCooldownDays = RoachBreeding.intervalDays * 0.5
         return true
     }
 

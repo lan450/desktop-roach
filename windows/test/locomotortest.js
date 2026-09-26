@@ -5,14 +5,17 @@ import { resetRandom } from './random.js';
 import { loadBrainData } from '../src/data.js';
 import { LocomotorSim, validateLocomotorCircuit } from '../src/locomotor.js';
 import { SixLegDynamics, makeLegMotorCommand } from '../src/legdynamics.js';
-import { Fly, makeSignals } from '../src/flymodel.js';
+import { Fly, makeSignals, buildFlyModel } from '../src/flymodel.js';
 import { LIFSim, SimulationClock } from '../src/sim.js';
 import { SignalBuilder } from '../src/signals.js';
 import * as THREE from '../node_modules/three/build/three.module.js';
 
 const data = loadBrainData();
 assert(data?.locomotor, 'shipped MaleCNS dataset is required');
-const geometries = new Fly({ x: 0, y: 0 }).model.legs.map((leg) => leg.geometry);
+// The motor-mechanics baseline is the fruit-fly leg set on both platforms
+// (evaluateLocomotor in LocomotorTests.swift calls buildFlyModel() directly),
+// independent of the boot body form.
+const geometries = buildFlyModel().legs.map((leg) => leg.geometry);
 let failures = 0;
 function check(name, run) {
   resetRandom(name);

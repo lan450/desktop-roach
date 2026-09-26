@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('flyAPI', {
   onRetarget: on('retarget'),
   onStimulate: on('stimulate'),
   sendSpikes: (list) => ipcRenderer.send('spikes', list),
+  sendColonyStatus: (status) => ipcRenderer.send('colony-status', status),
 
   // brain renderer
   onSpikes: on('spikes'),

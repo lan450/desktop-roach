@@ -1,0 +1,19 @@
+<!doctype html>
+<!-- snapshot.html — the posed body render behind tools/snapshot.mjs. Scene
+     setup mirrors renderer/overlay.js (key light + ambient + shadow catcher),
+     but with a small stage camera: 3/4 view by default, top-down orthographic
+     with ?top=1 — the view desktop users actually see. -->
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;">
+<title>Desktop Roach — snapshot</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #00ff00; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<script type="module" src="./snapshot-scene.js"></script>
+</body>
+</html>

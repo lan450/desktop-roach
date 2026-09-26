@@ -1,16 +1,33 @@
-# DesktopFly for Windows
+# DesktopRoach for Windows
 
-The Windows port of DesktopFly: the same 3D fruit fly on a transparent
+The Windows port of DesktopRoach: the same 3D American cockroach (with the
+fruit-fly and breeding-colony features of the macOS build) on a transparent
 desktop overlay, driven by the same 1 kHz leaky-integrate-and-fire simulation
 of 668 real brain neurons from the FlyWire connectome (FAFB v783), coupled
 to a walking circuit extracted from the MaleCNS brain-and-nerve-cord dataset.
 
-The brain, nerve cord, and leg mechanics mirror the Swift implementation.
-Walking uses six sets of antagonist motor outputs, articulated legs, foot
-contact and load feedback. Grounded foot motion supplies body translation
-and yaw. The whole feedback loop runs at a fixed 120 Hz, so 60 Hz and 120 Hz
-displays produce the same simulation. The legacy body path remains available for old bundles and extra
-flies without a simulated brain.
+The brain, nerve cord, leg mechanics, and colony life mirror the Swift
+implementation. Walking uses six sets of antagonist motor outputs, articulated
+legs, foot contact and load feedback. Grounded foot motion supplies body
+translation and yaw. The whole feedback loop runs at a fixed 120 Hz, so 60 Hz
+and 120 Hz displays produce the same simulation. The legacy body path remains
+available for old bundles and extra flies without a simulated brain.
+
+## Bodies and colony
+
+The tray boots as the cockroach (`BODY_FORM` default, like the macOS build);
+`Body: <next>` cycles between the fruit fly and the cockroach, rebuilding
+every body in place through the shared `FlyModel` contract
+(`src/roachmodel.js` is the port of `RoachModel.swift`). The stag-beetle
+body has not been ported; it slots into `BODY_FORM_CYCLE` when it is.
+
+The breeding colony is ported as well: ready adults court within
+`RoachBreeding.pairDistance`, the mother drags a visible ootheca, hatching
+splits `RoachBrood.planHatch` nymphs around her under the colony cap, and
+nymphs grow linearly into adults on the slider-scaled colony clock. The tray
+offers the macOS menu's controls adapted to Electron menus (no hosted
+sliders): `Breeding: On/Off`, `Breeding Speed` and `Colony Cap` radio
+submenus, `Introduce Pair`, and a live colony status row.
 
 The extracted anatomy and synapse counts are measured data. Coupling the
 female FlyWire brain to the male circuit by descending-neuron type, neuron
@@ -42,9 +59,11 @@ rewritten; everything that computes came over unchanged in behavior.
 npm install
 npm start              # tray icon; quit from there
 npm run simtest        # circuit invariants (MUST pass after sim changes)
-npm run behaviortest   # existing end-to-end brain -> behavior checks
+npm run behaviortest   # end-to-end brain -> body checks (all body forms + breeding)
 npm run locomotortest  # MaleCNS causal paths, joints, contact, steering and reverse
 npm test               # all three suites
+npm run snapshot -- --out=roach.png [--form=fly|roach] [--pose=idle|walking|flying|carry] [--top]
+                       # offscreen body render, the --snapshot counterpart
 ```
 
 `DESKTOPFLY_DEBUG=1 npm start` logs window terrain, overlay geometry and
@@ -102,7 +121,8 @@ overlay therefore stays resizable and the scene is always told the window's
 | `renderer/overlay.js` | `buildScene` + `Coordinator` from `main.swift` |
 | `renderer/brain.js` | port of `BrainView.swift` |
 | `src/sim.js` | port of `Sim.swift` (`LIFSim`, `SpikeBus`, `BrainSignals`) |
-| `src/flymodel.js` | port of `FlyModel.swift` (body geometry + behavior) |
+| `src/flymodel.js` | port of `FlyModel.swift` (behavior, forms, factory, colony) |
+| `src/roachmodel.js` | port of `RoachModel.swift` (procedural cockroach body) |
 | `src/locomotor.js` | MaleCNS nerve-cord simulation and motor readout |
 | `src/legdynamics.js` | articulated leg mechanics and ground contact |
 | `src/signals.js` | port of `SignalBuilder` |

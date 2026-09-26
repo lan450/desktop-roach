@@ -2,16 +2,24 @@
 // 18 end-to-end sim -> body checks. MUST pass after any behavior change.
 //   node test/behaviortest.js
 
+import * as THREE from '../node_modules/three/build/three.module.js';
 import { resetRandom } from './random.js';
 import { loadBrainData } from '../src/data.js';
 import { LIFSim, makeSignals } from '../src/sim.js';
 import { SignalBuilder } from '../src/signals.js';
-import { Fly, FLY_SCALE, WANDER_JITTER } from '../src/flymodel.js';
+import { Fly, FLY_SCALE, WANDER_JITTER, warmBodyTemplates, BODY_FORM_CYCLE,
+  setBodyForm, getBodyForm, nextForm, bodyName, RoachBreeding, RoachBrood,
+  BodyFactory } from '../src/flymodel.js';
 import { circadianActivity, makeLedge } from '../src/environment.js';
 import { rnd, lag, TUNED_HZ } from '../src/util.js';
 
 const data = loadBrainData();
 if (!data) { process.stderr.write('no data/ — run etl.py first\n'); process.exit(1); }
+
+// Build both body templates before the first seeded stream: three.js
+// geometry constructors draw from Math.random, and a lazily built template
+// would shift the streams by a form-dependent amount (see warmBodyTemplates).
+warmBodyTemplates();
 
 const bounds = { width: 1512, height: 982 };
 const dt = 1 / 60;
@@ -244,6 +252,227 @@ bodyCheck('landing is smooth: no scale/height snap at touchdown', () => {
   }
   return [landed && maxDS < 0.2 && maxDZ < 25,
           `landed=${landed ? 'yes' : 'NO'}, max per-frame dScale ${f(maxDS)}, dz ${f(maxDZ, 1)}`];
+});
+
+// ---- body forms: roach geometry on the shared behavior layer ----
+bodyCheck('wings beat and threat-raise under every body form', () => {
+  const saved = getBodyForm();
+  const detail = [];
+  let ok = true;
+  for (const form of BODY_FORM_CYCLE) {
+    setBodyForm(form);
+    resetRandom(`wings beat ${form}`);
+    const flier = new Fly({ x: 0, y: 0 });
+    flier.state = 'idle';
+    flier.startFlight(bounds, { effort: 0.8 });
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < 30 && flier.state === 'flying'; i++) {
+      flier.update(dt, bounds, null, makeSignals());
+      const z = flier.model.foldedWings.children[0].rotation.z;
+      lo = Math.min(lo, z); hi = Math.max(hi, z);
+    }
+    const beatOK = hi - lo > 0.25;
+    const threat = new Fly({ x: 0, y: 0 });
+    threat.state = 'walking'; threat.speed = 20;
+    threat.dartCooldown = 99;
+    const hot = makeSignals(); hot.wingDrive = 0.9; hot.walkDrive = 0.4;
+    for (let i = 0; i < 40; i++) threat.update(dt, bounds, null, hot);
+    const raiseOK = threat.state !== 'flying' && threat.wingRaise > 0.6
+      && threat.model.foldedWings.children[0].rotation.x < -0.2;
+    ok = ok && beatOK && raiseOK;
+    detail.push(`${form}: beat ${f(beatOK ? hi - lo : 0)} raise ${f(threat.wingRaise)}`);
+  }
+  setBodyForm(saved);
+  return [ok, detail.join(' | ')];
+});
+
+bodyCheck('[roach] tegmina spread in flight and hold a steady angle', () => {
+  setBodyForm('roach');
+  const fly = new Fly({ x: 0, y: 0 });
+  fly.state = 'idle';
+  for (let i = 0; i < 20; i++) fly.update(dt, bounds, null, makeSignals());
+  if (!fly.model.elytraL || !fly.model.elytraR) return [false, 'no tegmina'];
+  const closed = fly.model.elytraL.rotation.z;
+  fly.startFlight(bounds, { effort: 0.8 });
+  let open = closed, openDrive = 0;
+  let lo = Infinity, hi = -Infinity, sampled = 0, i = 0;
+  while (i < 40 && fly.state === 'flying') {
+    fly.update(dt, bounds, null, makeSignals());
+    if (i >= 20 && fly.state === 'flying') {      // past the open-up transient
+      open = fly.model.elytraL.rotation.z;
+      openDrive = fly.elytraOpen;
+      lo = Math.min(lo, open); hi = Math.max(hi, open);
+      sampled++;
+    }
+    i++;
+  }
+  // the tegmina must sit at a steady open angle, NOT buzz with the wingbeat
+  const jitter = sampled > 1 ? hi - lo : 999;
+  const ok = openDrive > 0.8 && Math.abs(open - closed) > 0.3 && jitter < 0.05;
+  return [ok, `closed ${f(closed)} -> open ${f(open)} rad, drive ${f(openDrive)}, jitter ${f(jitter, 3)}`];
+});
+
+bodyCheck('[roach] threat opens the tegmina without takeoff', () => {
+  setBodyForm('roach');
+  let detail = 'no attempt ran';
+  // brainBehavior runs a 0.005/s spontaneous-takeoff lottery while walking,
+  // which ends the window early ~0.3% of the time for reasons unrelated to
+  // the posture. Retry rather than weaken the no-takeoff assertion.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    resetRandom(`roach threat ${attempt}`);
+    const fly = new Fly({ x: 0, y: 0 });
+    if (!fly.model.elytraL) return [false, 'no tegmina'];
+    fly.state = 'walking'; fly.speed = 20;
+    fly.dartCooldown = 99;
+    const closed = fly.model.elytraL.rotation.z;
+    const threat = makeSignals(); threat.wingDrive = 0.9; threat.walkDrive = 0.4;
+    let tookOff = false;
+    for (let i = 0; i < 40; i++) {
+      fly.update(dt, bounds, null, threat);
+      if (fly.state === 'flying') { tookOff = true; break; }
+    }
+    detail = `open ${f(fly.elytraOpen)}, tegmen ${f(closed)} -> ${f(fly.model.elytraL.rotation.z)} rad${tookOff ? ' (spontaneous takeoff, retried)' : ''}`;
+    if (!tookOff && fly.elytraOpen > 0.5
+      && Math.abs(fly.model.elytraL.rotation.z - closed) > 0.2) return [true, detail];
+  }
+  return [false, detail];
+});
+
+bodyCheck('body swap keeps behavior state, position and the model contract', () => {
+  setBodyForm('fly');
+  const fly = new Fly({ x: 40, y: -20 });
+  fly.state = 'walking'; fly.speed = 33; fly.heading = 1.2;
+  for (let i = 0; i < 30; i++) fly.update(dt, bounds, null, walkSignals);
+  const st = fly.state, sp = fly.speed, hd = fly.heading, p = { ...fly.pos };
+  const flyHadElytra = fly.model.elytraL !== null;
+  const holder = new THREE.Object3D();
+  holder.add(fly.node);
+  const oldRoot = fly.node;
+
+  for (const target of ['roach', 'fly']) {
+    setBodyForm(target);
+    fly.swapBody();
+    const contract = fly.model.legs.length === 6
+      && fly.model.foldedWings.children.length === 2
+      && (target === 'roach') === (fly.model.elytraL !== null)
+      && (target === 'roach') === (fly.model.elytraR !== null);
+    const kept = fly.state === st && fly.speed === sp && fly.heading === hd
+      && fly.pos.x === p.x && fly.pos.y === p.y;
+    const reparented = fly.node !== oldRoot && !oldRoot.parent
+      && fly.node.parent === holder;
+    if (!(contract && kept && reparented && !flyHadElytra)) {
+      return [false, `${target}: contract=${contract} state kept=${kept} `
+        + `reparented=${reparented} fly form had elytra=${flyHadElytra}`];
+    }
+  }
+  return [true, 'roach + fly swaps kept state, position and the contract'];
+});
+
+bodyCheck('body factory: 48 clones stay within a frame budget and share geometry', () => {
+  setBodyForm('roach');
+  const t0 = Date.now();
+  const models = [];
+  for (let i = 0; i < 48; i++) models.push(BodyFactory.instantiate('roach'));
+  const ms = Date.now() - t0;
+  const contract = models.every((m) => m.legs.length === 6
+    && m.foldedWings.children.length === 2 && m.elytraL !== null);
+  // the clones must share geometry: one master build, not 48
+  const meshOf = (m) => m.legs[0].root.children.find((c) => c.isMesh);
+  const shared = meshOf(models[0]).geometry === meshOf(models[47]).geometry;
+  const blurPrivate = models[0].blurWingL.material !== models[1].blurWingL.material;
+  return [ms < 150 && contract && shared && blurPrivate,
+    `48 clones in ${ms} ms, contract ok=${contract ? 'yes' : 'NO'}, `
+    + `geometry shared=${shared ? 'yes' : 'NO'}, blur material private=${blurPrivate ? 'yes' : 'NO'}`];
+});
+
+bodyCheck('size: explicit size scales the body; nymphs grow monotonically', () => {
+  setBodyForm('roach');
+  const small = new Fly({ x: 0, y: 0 }, 0.5, 1.0);
+  const scaleOK = Math.abs(small.node.scale.x - FLY_SCALE * 0.5) < 0.001;
+  let monotonic = true;
+  let last = small.sizeScale;
+  small.ageDays = 85;                    // jump near adulthood
+  for (let i = 0; i < 20; i++) {         // a few ticks past maturity
+    small.update(dt, bounds, null, makeSignals());
+    if (small.sizeScale < last - 1e-9) monotonic = false;
+    last = small.sizeScale;
+  }
+  const grownOK = small.sizeScale > 0.93 && small.sizeScale <= 1.0 + 1e-6;
+  return [scaleOK && monotonic && grownOK,
+    `scale0=${scaleOK ? 'yes' : 'NO'} monotonic=${monotonic ? 'yes' : 'NO'} size ${f(small.sizeScale, 3)} at ~86d`];
+});
+
+bodyCheck('breeding speed slider compresses the colony clock', () => {
+  const savedSpeed = RoachBreeding.speedMultiplier;
+  RoachBreeding.speedMultiplier = 100;
+  const getterOK = Math.abs(RoachBreeding.daySecondsNow - 0.3) < 1e-9;
+  // 12 s of real time must age a roach ~40 simulated days (the Swift suite
+  // runs the same probe), so a lost multiplier inside update() cannot hide
+  const roach = new Fly({ x: 0, y: 0 });
+  roach.state = 'idle';
+  const age0 = roach.ageDays;
+  for (let i = 0; i < 60; i++) roach.update(0.2, bounds, null, makeSignals());
+  const aged = roach.ageDays - age0;
+  RoachBreeding.speedMultiplier = savedSpeed;   // other checks run at 1x
+  const ok = getterOK && aged > 20 && aged < 60;
+  return [ok, `100x -> day ${f(RoachBreeding.daySecondsNow, 2)} s, aged ${f(aged, 1)} sim-days in 12 s`];
+});
+
+bodyCheck('breeding: ready adults court, carry, and plan a nymph brood', () => {
+  setBodyForm('roach');
+  const a = new Fly({ x: 0, y: 0 });
+  const b = new Fly({ x: 20, y: 0 });
+  if (!a.tryFertilize(b)) return [false, 'ready pair refused to mate'];
+  // the mother is drawn randomly between the two partners
+  const mother = a.carryingDays >= 0 ? a : b;
+  const partner = mother === a ? b : a;
+  if (!(mother.carryingDays >= 0 && mother.carryingDays < RoachBreeding.oothecaDays)) {
+    return [false, 'no ootheca started on the mother'];
+  }
+  if (partner.carryingDays >= 0) return [false, 'both partners started a brood'];
+  if (!(partner.broodCooldownDays > 0 && mother.broodCooldownDays > 0)) {
+    return [false, 'cooldowns not set after courtship'];
+  }
+  if (mother.tryFertilize(partner)) return [false, 're-fertilized while carrying'];
+  const sleeper = new Fly({ x: -20, y: 0 });
+  sleeper.state = 'sleeping';
+  if (sleeper.tryFertilize(partner)) return [false, 'mated with a sleeper'];
+  const cooling = new Fly({ x: -40, y: 0 });
+  cooling.broodCooldownDays = 1;   // awake, adult, but resting between broods
+  if (cooling.canMate) return [false, 'cooldown does not gate canMate'];
+  if (cooling.tryFertilize(partner)) return [false, 'mated while cooling down'];
+  mother.carryingDays = RoachBreeding.oothecaDays + 1;    // term exceeded
+  const brood = RoachBrood.planHatch(mother);
+  const countOK = brood.length >= RoachBreeding.eggsRange[0]
+    && brood.length <= RoachBreeding.eggsRange[1];
+  const sizeOK = brood.every((n) => n.size >= RoachBreeding.nymphSize[0]
+    && n.size <= RoachBreeding.nymphSize[1]
+    && n.target >= RoachBreeding.adultSize[0] && n.target <= RoachBreeding.adultSize[1]);
+  mother.hatchDone();
+  const formOK = nextForm('roach') === 'fly' && nextForm('fly') === 'roach'
+    && bodyName('roach') === 'Cockroach';
+  return [countOK && sizeOK && mother.carryingDays < 0 && formOK,
+    `n=${brood.length} in [${RoachBreeding.eggsRange}], sizes ok=${sizeOK ? 'yes' : 'NO'}, form cycle ok=${formOK ? 'yes' : 'NO'}`];
+});
+
+bodyCheck('form cycle: swap restores the identical geometry contract each round', () => {
+  const fly = new Fly({ x: 0, y: 0 });
+  // carrying a brood across swaps: the case must reattach to every new root
+  fly.carryingDays = 0.5;
+  fly.syncOotheca();
+  for (const target of ['fly', 'roach', 'fly', 'roach']) {
+    setBodyForm(target);
+    fly.swapBody();
+    const contract = fly.model.legs.length === 6
+      && fly.model.foldedWings.children.length === 2
+      && (target === 'roach') === (fly.model.elytraL !== null);
+    if (!contract) return [false, `${target}: contract broken`];
+  }
+  const attached = fly.carryingDays >= 0 && fly.ootheca
+    && fly.ootheca.parent === fly.model.root && fly.ootheca.visible;
+  fly.hatchDone();
+  return [attached && fly.ootheca === null,
+    `ootheca reattached through swaps=${attached ? 'yes' : 'NO'}`];
 });
 
 bodyCheck('circadian curve: siesta + night dips, dawn/dusk peaks', () => {

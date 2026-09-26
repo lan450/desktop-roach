@@ -18,6 +18,10 @@ import * as THREE from '../node_modules/three/build/three.module.js';
 import { rnd, clampf, angleDiff, smoothstep, lag, TUNED_HZ } from './util.js';
 import { makeSignals } from './sim.js';
 import { LegDynamics, SixLegDynamics } from './legdynamics.js';
+// Circular import by design: roachmodel.js needs Leg/buildLeg/mat/srgb from
+// here and only touches them inside its build function, which runs long after
+// both modules have finished evaluating.
+import { buildRoachModel } from './roachmodel.js';
 
 export const SHADOWS_ENABLED = true;
 export const FLY_SCALE = 1.15;
@@ -61,8 +65,62 @@ export const SACCADE_DUR = 0.09;
 // swing fraction instead, which stretches the swing at low speed.
 export const SWING_DUR = 0.035;
 
+// Colony dynamics for the breeding feature, anchored on real Periplaneta
+// americana biology and compressed for the desktop: an ootheca carries
+// ~14-16 eggs and is carried ~2 days, nymphs mature in ~90 days, and a
+// fertilized female starts a new ootheca every ~4 days under good
+// conditions. One simulated day lasts `daySeconds` real seconds, so a nymph
+// reaches adulthood in ~45 minutes and the colony visibly snowballs.
+export const RoachBreeding = {
+  daySeconds: 30,           // real seconds per simulated day at 1x
+  // Colony clock multiplier, driven by the tray menu (1-100). It compresses
+  // every breeding timescale uniformly: at 100x an ootheca hatches in 0.6 s
+  // and a nymph matures in ~27 s — the "watch it happen" setting.
+  speedMultiplier: 1,
+  get daySecondsNow() { return this.daySeconds / this.speedMultiplier; },
+  oothecaDays: 2,           // the case is carried before hatching
+  intervalDays: 4,          // rest between broods
+  maturityDays: 90,         // nymph -> adult
+  nymphSize: [0.38, 0.52],
+  adultSize: [0.8, 1.25],
+  eggsRange: [6, 9],        // nymphs per ootheca, sim-friendly
+  // Hard cap on the colony, user-settable from the tray menu. Bodies share
+  // geometry through the template factory, so the cost per roach is scene
+  // nodes + per-tick behavior, not a private mesh — the cap keeps both
+  // bounded (the 200 stop is the practical frame-budget ceiling).
+  colonyCap: 48,
+  pairDistance: 70,         // courtship proximity, desktop px
+  chancePerSecond: 0.2,     // when a ready pair is close
+};
+
+// Which body geometry to build. Purely cosmetic — every form must satisfy the
+// same FlyModel contract, so the behavior layer never branches on it.
+// DesktopRoach's identity is the roach, so the boot default is 'roach' (the
+// tray menu still cycles through every form). Self-tests set the form
+// explicitly, so they are unaffected by the default. The stag beetle of the
+// macOS build has not been ported; it slots into the cycle when it is.
+export const BODY_FORM_CYCLE = ['fly', 'roach'];
+
+let bodyForm = 'roach';
+
+export function getBodyForm() { return bodyForm; }
+export function setBodyForm(f) { if (BODY_FORM_CYCLE.includes(f)) bodyForm = f; }
+
+export function nextForm(f) {
+  const i = BODY_FORM_CYCLE.indexOf(f);
+  return BODY_FORM_CYCLE[(i + 1) % BODY_FORM_CYCLE.length];
+}
+
+export function bodyName(f) {
+  switch (f) {
+    case 'fly': return 'Fruit Fly';
+    case 'roach': return 'Cockroach';
+    default: return f;
+  }
+}
+
 // NSColor(calibratedRed:green:blue:) values are sRGB components.
-function srgb(r, g, b) { return new THREE.Color().setRGB(r, g, b, THREE.SRGBColorSpace); }
+export function srgb(r, g, b) { return new THREE.Color().setRGB(r, g, b, THREE.SRGBColorSpace); }
 function blendBlack(c, f) { return c.clone().multiplyScalar(1 - f); }
 function blendWhite(c, f) { return c.clone().lerp(new THREE.Color(1, 1, 1), f); }
 
@@ -122,7 +180,7 @@ export class Leg {
 
 }
 
-function buildLeg(attach, baseYaw, swingSign, phase, isFront, femur, tibia, tarsus) {
+export function buildLeg(attach, baseYaw, swingSign, phase, isFront, femur, tibia, tarsus) {
   const legColor = srgb(0.33, 0.24, 0.14);
   const root = new THREE.Object3D();
   root.position.set(attach[0], attach[1], attach[2]);
@@ -287,14 +345,160 @@ export function buildFlyModel() {
     br.castShadow = false;
   }
 
-  return { root, legs, foldedWings, blurWingL: bl, blurWingR: br, abdomen, wingFlightSpread: 1.1 };
+  return { root, legs, foldedWings, blurWingL: bl, blurWingR: br, abdomen,
+    elytraL: null, elytraR: null, wingFlightSpread: 1.1 };
 }
+
+// One master copy per body form. The first build runs the procedural
+// constructors; every later body is a deep clone of the master, which shares
+// all geometry and material instances — one GPU upload per form instead of
+// one per roach, and swapping skins across a 48-roach colony stops
+// stuttering (three.js Object3D.clone() shares buffers, like SCNNode.clone()).
+const bodyTemplates = new Map();
+
+// UUID generation must not consume the shared Math.random stream: three.js
+// draws one per Object3D node, so building or cloning a body would burn a
+// form-dependent number of draws (748 for a roach, 452 for a fly) and desync
+// the seeded random streams the behavior tests rely on — SceneKit never
+// touches the test stream. A local deterministic generator keeps clone uuids
+// unique without touching the global stream.
+let uuidState = 0x2f6e2b1;
+function uuidRandom() {
+  uuidState = (Math.imul(uuidState, 1664525) + 1013904223) >>> 0;
+  return uuidState / 4294967296;
+}
+
+// Runs body(fn) with Math.random pointed at the local generator.
+function withoutSharedRandom(fn) {
+  const shared = Math.random;
+  Math.random = uuidRandom;
+  try {
+    return fn();
+  } finally {
+    Math.random = shared;
+  }
+}
+
+function buildTemplate(form) {
+  const model = withoutSharedRandom(() =>
+    form === 'roach' ? buildRoachModel() : buildFlyModel());
+  const root = model.root;
+  model.legs.forEach((leg, i) => {
+    leg.root.name = `leg${i}.root`;
+    leg.knee.name = `leg${i}.knee`;
+    leg.ankle.name = `leg${i}.ankle`;
+  });
+  model.foldedWings.name = 'foldedWings';
+  model.blurWingL.name = 'blurWingL';
+  model.blurWingR.name = 'blurWingR';
+  model.abdomen.name = 'abdomen';
+  if (model.elytraL) model.elytraL.name = 'elytraL';
+  if (model.elytraR) model.elytraR.name = 'elytraR';
+  const specs = model.legs.map((leg) => ({
+    geometry: leg.geometry, baseYaw: leg.baseYaw, swingSign: leg.swingSign,
+    phase: leg.phase, isFront: leg.isFront,
+  }));
+  return { root, specs, wingFlightSpread: model.wingFlightSpread };
+}
+
+export const BodyFactory = {
+  instantiate(form) {
+    let t = bodyTemplates.get(form);
+    if (!t) { t = withoutSharedRandom(() => buildTemplate(form)); bodyTemplates.set(form, t); }
+    const root = withoutSharedRandom(() => t.root.clone(true));
+    const legs = t.specs.map((spec, i) => {
+      const r = root.getObjectByName(`leg${i}.root`);
+      const k = root.getObjectByName(`leg${i}.knee`);
+      const a = root.getObjectByName(`leg${i}.ankle`);
+      const leg = new Leg(r, k, a, spec.geometry, spec.baseYaw,
+        spec.swingSign, spec.phase, spec.isFront);
+      leg.apply();   // restore the rest pose on the cloned joints
+      return leg;
+    });
+    // The blur discs animate their opacity per fly, so their shared material
+    // must become private on every clone. Everything else stays shared.
+    const blurWingL = root.getObjectByName('blurWingL');
+    const blurWingR = root.getObjectByName('blurWingR');
+    blurWingL.material = blurWingL.material.clone();
+    blurWingR.material = blurWingR.material.clone();
+    return {
+      root,
+      legs,
+      foldedWings: root.getObjectByName('foldedWings'),
+      blurWingL,
+      blurWingR,
+      abdomen: root.getObjectByName('abdomen'),
+      elytraL: root.getObjectByName('elytraL') || null,
+      elytraR: root.getObjectByName('elytraR') || null,
+      wingFlightSpread: t.wingFlightSpread,
+    };
+  },
+};
+
+function buildBody() {
+  return BodyFactory.instantiate(bodyForm);
+}
+
+// Build every template up front. three.js geometry constructors draw from
+// Math.random internally (unlike SceneKit), so a template built lazily would
+// burn a different number of draws per form and shift the seeded random
+// streams the behavior tests rely on. Warming them keeps the streams purely
+// behavioral, matching the Swift suites.
+export function warmBodyTemplates() {
+  for (const form of BODY_FORM_CYCLE) BodyFactory.instantiate(form);
+}
+
+// The leathery egg case a fertilized female drags at her tail. One shared
+// accessory for every body form: pure display, nothing reads it back.
+function buildOotheca() {
+  const node = new THREE.Object3D();
+  // Dragged behind the tegmina tips: under the wings it would be invisible
+  // from the desktop's top-down view, which is not how a carrying female
+  // reads. Local terms, so it follows whatever body form is mounted.
+  node.position.set(0, -16.8, 2.9);
+  const caseNode = new THREE.Mesh(
+    new THREE.CapsuleGeometry(0.55, Math.max(0.01, 2.7 - 1.1), 4, 10),
+    mat(srgb(0.34, 0.18, 0.09), 0.22, 0.3));
+  caseNode.position.set(0, -1.3, -0.55);
+  caseNode.rotation.set(Math.PI / 2 - 0.55, 0, 0);   // trails back, tip down
+  node.add(caseNode);
+  // the keel seam that real oothecae carry along their top edge
+  const seam = new THREE.Mesh(
+    new THREE.CapsuleGeometry(0.055, Math.max(0.01, 2.4 - 0.11), 4, 8),
+    mat(srgb(0.18, 0.08, 0.04)));
+  seam.position.set(0, -1.15, 0.28);
+  seam.rotation.set(Math.PI / 2 - 0.4, 0, 0);
+  node.add(seam);
+  return node;
+}
+
+// Pure hatch planning, kept testable: where the nymphs scatter around the
+// mother, each with its nymph size and the adult size it will grow toward.
+export const RoachBrood = {
+  planHatch(mother) {
+    const n = Math.floor(rnd(RoachBreeding.eggsRange[0], RoachBreeding.eggsRange[1] + 0.999));
+    return Array.from({ length: n }, () => {
+      const angle = rnd(0, 2 * Math.PI), r = rnd(12, 45);
+      return {
+        pos: { x: mother.pos.x + Math.cos(angle) * r,
+               y: mother.pos.y + Math.sin(angle) * r },
+        size: rnd(RoachBreeding.nymphSize[0], RoachBreeding.nymphSize[1]),
+        target: rnd(RoachBreeding.adultSize[0], RoachBreeding.adultSize[1]),
+      };
+    });
+  },
+};
 
 // MARK: - Behavior
 
 export class Fly {
-  constructor(p) {
-    this.model = buildFlyModel();
+  // `size` is the render scale multiplier (roach #1 is fixed at 1; later
+  // roaches vary). Pass `adultTarget > size` for a nymph, which then grows
+  // linearly toward it over maturityDays; the default is an adult that keeps
+  // its size. Adults start exactly at maturity — no random draw here, so the
+  // seeded random streams of the behavior tests stay put.
+  constructor(p, size = 1, adultTarget = null) {
+    this.model = buildBody();
     this.legDynamics = new SixLegDynamics(this.model.legs.map((leg) => leg.geometry));
     const standing = this.legDynamics.feedback;
     this.model.legs.forEach((leg, i) => leg.apply(standing[i]));
@@ -309,6 +513,17 @@ export class Fly {
     this.ledgeHeading = null;
     this.wingFlightAmount = 0;
     this.sensedLegFeedback = [];
+
+    // -- colony life (breeding + individual size) --
+    // Render scale multiplier; every scale write goes through sizeScale.
+    this.sizeScale = size;
+    this.birthSize = size;                 // size at emergence; growth is linear
+    this.adultTarget = adultTarget !== null ? adultTarget : size;
+    this.ageDays = adultTarget === null ? RoachBreeding.maturityDays : 0;
+    this.carryingDays = -1;                // >= 0 while an ootheca is carried
+    this.broodCooldownDays = 0;            // simulated days of rest before breeding
+    this.ootheca = null;
+    this.elytraOpen = 0;                   // display only: 0 closed .. 1 fully spread
 
     this.pos = { x: p.x, y: p.y };
     this.heading = rnd(0, 2 * Math.PI);
@@ -346,10 +561,18 @@ export class Fly {
     this.liveArousal = 0;
     this.liveWing = 0;
 
+    // boot scale includes the body's own size multiplier
+    this.node.scale.set(FLY_SCALE * this.sizeScale,
+      FLY_SCALE * this.sizeScale, FLY_SCALE * this.sizeScale);
     this.syncNode();
   }
 
   get node() { return this.model.root; }
+  get isAdult() { return this.ageDays >= RoachBreeding.maturityDays; }
+  get canMate() {
+    return this.isAdult && this.carryingDays < 0
+      && this.broodCooldownDays <= 0 && this.state !== 'sleeping';
+  }
   get legFeedback() { return this.sensedLegFeedback.length === this.model.legs.length
     ? this.sensedLegFeedback : this.legDynamics.feedback; }
   get gaitPhasePublic() { return this.gaitPhase; }
@@ -436,9 +659,71 @@ export class Fly {
     this.speed = 0;
     this.alt = 0;
     this.pitch = 0;
-    this.node.scale.set(FLY_SCALE, FLY_SCALE, FLY_SCALE);
+    const s = FLY_SCALE * this.sizeScale;
+    this.node.scale.set(s, s, s);
     this.node.position.z = 0;
     // Wing closure and leg settling continue from their airborne poses.
+  }
+
+  // Keep the carried ootheca attached: built lazily, reattached after a body
+  // swap (the old root took it away), hidden once the brood hatches. Exposed
+  // for the snapshot poser, which sets `carryingDays` without running
+  // behavior ticks; the render loop reaches it through update().
+  syncOotheca() {
+    const carrying = this.carryingDays >= 0;
+    if (carrying && !this.ootheca) this.ootheca = buildOotheca();
+    if (!this.ootheca) return;
+    // Reparent whenever the case is not on the current body root: after a
+    // body swap it still hangs on the discarded root (whose own parent is
+    // nil), so a nil-parent test would silently lose a carrying female's
+    // brood across every form change.
+    if (carrying && this.ootheca.parent !== this.model.root) {
+      this.model.root.add(this.ootheca);
+    }
+    this.ootheca.visible = carrying;
+  }
+
+  // The ootheca hatched; back to resting until the next brood.
+  hatchDone() {
+    this.carryingDays = -1;
+    if (this.ootheca) this.ootheca.removeFromParent();
+    this.ootheca = null;
+  }
+
+  // Courtship between two ready adults: one of them (the "mother") starts
+  // carrying an ootheca, both take a rest. Returns whether it happened.
+  tryFertilize(partner) {
+    if (!this.canMate || !partner.canMate) return false;
+    const mother = rnd(0, 1) < 0.5 ? this : partner;
+    const mate = mother === this ? partner : this;
+    mother.carryingDays = 0;
+    mother.broodCooldownDays = RoachBreeding.intervalDays;
+    mate.broodCooldownDays = RoachBreeding.intervalDays * 0.5;
+    return true;
+  }
+
+  // Rebuild the body in the current body form, in place. Behavior state
+  // (position, gait phase, flight, ledge) is untouched — only geometry swaps.
+  swapBody() {
+    const old = this.model.root;
+    const parent = old.parent;
+    if (parent) parent.remove(old);
+    this.model = buildBody();
+    this.legDynamics = new SixLegDynamics(this.model.legs.map((leg) => leg.geometry));
+    const standing = this.legDynamics.feedback;
+    this.model.legs.forEach((leg, i) => leg.apply(standing[i]));
+    this.motorWalking = false;
+    this.renderedLegState = null;
+    this.renderedMotorControl = false;
+    this.sensedLegFeedback = [];
+    this.model.root.position.copy(old.position);
+    this.model.root.scale.copy(old.scale);
+    this.model.root.rotation.copy(old.rotation);
+    this.model.blurWingL.visible = this.state === 'flying';
+    this.model.blurWingR.visible = this.state === 'flying';
+    if (parent) parent.add(this.model.root);
+    this.syncOotheca();
+    this.syncNode();
   }
 
   // Queue a small spontaneous body saccade. Larger direction changes use
@@ -509,6 +794,24 @@ export class Fly {
     this.scareCooldown = Math.max(0, this.scareCooldown - dt);
     this.dartCooldown = Math.max(0, this.dartCooldown - dt);
     this.backwardTimer = Math.max(0, this.backwardTimer - dt);
+
+    // colony life: aging, nymph growth, carried ootheca
+    const day = RoachBreeding.daySecondsNow;   // slider-scaled colony clock
+    this.ageDays += dt / day;
+    if (this.carryingDays >= 0) this.carryingDays += dt / day;
+    if (this.broodCooldownDays > 0) {
+      this.broodCooldownDays = Math.max(0, this.broodCooldownDays - dt / day);
+    }
+    const grown = this.birthSize + (this.adultTarget - this.birthSize)
+      * Math.min(1, this.ageDays / RoachBreeding.maturityDays);
+    if (Math.abs(grown - this.sizeScale) > 0.0001) {
+      this.sizeScale = grown;
+      if (this.state !== 'flying') {   // applyAltitude already includes sizeScale mid-flight
+        const s = FLY_SCALE * this.sizeScale;
+        this.node.scale.set(s, s, s);
+      }
+    }
+    this.syncOotheca();
 
     this.stateAge += dt;
     this.dartTimer = Math.max(0, this.dartTimer - dt);
@@ -730,7 +1033,7 @@ export class Fly {
   }
 
   applyAltitude() {
-    const s = FLY_SCALE * (1 + 0.8 * this.alt);
+    const s = FLY_SCALE * this.sizeScale * (1 + 0.8 * this.alt);
     this.node.scale.set(s, s, s);
     this.node.position.z = 90 * this.alt;
   }
@@ -884,6 +1187,21 @@ export class Fly {
     this.model.blurWingR.visible = this.wingFlightAmount !== 0;
     this.model.blurWingL.rotation.set(0, 0, 0.45 + stroke * 0.2);
     this.model.blurWingR.rotation.set(0, 0, -0.45 - stroke * 0.2);
+    this.updateElytra(flying ? 1 : this.wingRaise, dt);
+  }
+
+  // Display only. The wing cases swing outward and tip up when airborne or
+  // when the grounded threat posture is on; they hold that angle rather than
+  // buzzing along with the hindwings, the way a real beetle flies.
+  updateElytra(target, dt) {
+    const l = this.model.elytraL, r = this.model.elytraR;
+    if (!l || !r) return;
+    this.elytraOpen += (target - this.elytraOpen) * lag(10, dt);
+    if (this.elytraOpen < 0.001) this.elytraOpen = 0;
+    const yaw = 0.62 * this.elytraOpen;
+    const lift = 0.85 * this.elytraOpen;
+    l.rotation.set(0, lift, -yaw);
+    r.rotation.set(0, -lift, yaw);
   }
 }
 

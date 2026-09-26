@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { loadBrainData } from './src/data.js';
 import { circadianActivity, ThermalTempo } from './src/environment.js';
 import { listWindows, pollMouseButtons, win32Available } from './src/win32.js';
+import { nextForm, bodyName } from './src/flymodel.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEBUG = !!process.env.DESKTOPFLY_DEBUG;
@@ -35,6 +36,15 @@ let typingLevel = 0;
 let prevCursor = null;
 let mouseMovedAt = 0;
 const thermal = new ThermalTempo();
+
+// The tracked form mirrors the overlay's bodyForm: the tray item offers the
+// NEXT form, so it reads as an action (like the macOS menu does).
+let requestedBody = 'roach';
+let breedingOn = true;
+let breedingSpeed = 1;
+let colonyCap = 48;
+let colonyStatus = 'no pair yet';
+let pendingCommands = [];
 
 let brainData = null;
 let dataInfo = 'no data — run etl.py';
@@ -161,8 +171,11 @@ function send(win, channel, payload) {
 
 function buildTrayMenu() {
   const multi = screen.getAllDisplays().length > 1;
+  // Electron menus cannot host sliders the way the macOS menu does (where the
+  // NSMenu view rows had their own fragility), so the colony controls are
+  // radio submenus offering the same range in coarse steps.
   return Menu.buildFromTemplate([
-    { label: 'Desktop Fly', enabled: false },
+    { label: 'Desktop Roach', enabled: false },
     { label: dataInfo, enabled: false },
     { type: 'separator' },
     {
@@ -197,9 +210,56 @@ function buildTrayMenu() {
       })),
     },
     ...(multi ? [{ label: 'Send Fly to Next Display', click: sendFlyToNextDisplay }] : []),
-    { label: 'Add Fly', click: () => send(overlay, 'cmd', { name: 'addFly' }) },
-    { label: 'Remove Fly', click: () => send(overlay, 'cmd', { name: 'removeFly' }) },
-    { label: 'Scare Flies', click: () => send(overlay, 'cmd', { name: 'scareAll' }) },
+    { label: 'Add Pet', click: () => send(overlay, 'cmd', { name: 'addFly' }) },
+    { label: 'Remove Pet', click: () => send(overlay, 'cmd', { name: 'removeFly' }) },
+    { label: 'Scare Pets', click: () => send(overlay, 'cmd', { name: 'scareAll' }) },
+    { type: 'separator' },
+    {
+      label: `Breeding: ${breedingOn ? 'On' : 'Off'}`,
+      click: () => {
+        breedingOn = !breedingOn;
+        send(overlay, 'cmd', { name: 'setBreeding', value: breedingOn });
+        colonyStatus = breedingOn ? colonyStatus : 'colony paused';
+        refreshTray();
+      },
+    },
+    {
+      label: 'Breeding Speed',
+      submenu: [1, 5, 20, 50, 100].map((v) => ({
+        label: `×${v}`,
+        type: 'radio',
+        checked: breedingSpeed === v,
+        click: () => {
+          breedingSpeed = v;
+          send(overlay, 'cmd', { name: 'setBreedingSpeed', value: v });
+          refreshTray();
+        },
+      })),
+    },
+    {
+      label: `Colony Cap: ${colonyCap}`,
+      submenu: [2, 12, 24, 48, 96, 200].map((v) => ({
+        label: `${v} roaches`,
+        type: 'radio',
+        checked: colonyCap === v,
+        click: () => {
+          colonyCap = v;
+          send(overlay, 'cmd', { name: 'setColonyCap', value: v });
+          refreshTray();
+        },
+      })),
+    },
+    { label: 'Introduce Pair', click: () => send(overlay, 'cmd', { name: 'forceMating' }) },
+    { label: colonyStatus, enabled: false },
+    {
+      // the item offers the NEXT form, so it reads as an action
+      label: `Body: ${bodyName(nextForm(requestedBody))}`,
+      click: () => {
+        requestedBody = nextForm(requestedBody);
+        send(overlay, 'cmd', { name: 'setBodyForm', value: requestedBody });
+        refreshTray();
+      },
+    },
     { type: 'separator' },
     { label: 'Quit', click: () => { app.isQuitting = true; app.quit(); } },
   ]);
@@ -339,14 +399,28 @@ app.whenReady().then(() => {
 
   desktop = virtualBounds();
   overlay = createOverlay(desktop);
-  overlay.webContents.once('did-finish-load', publishGeometry);
+  // commands sent before the renderer finished loading are silently dropped
+  // (nothing has registered on 'cmd' yet), so tray actions and CLI demo
+  // commands queue here and flush on the same signal as publishGeometry
+  overlay.webContents.once('did-finish-load', () => {
+    publishGeometry();
+    for (const cmd of pendingCommands) send(overlay, 'cmd', cmd);
+    pendingCommands.length = 0;
+  });
   overlay.on('resize', publishGeometry);
   overlay.on('move', publishGeometry);
   if (brainData) brain = createBrain(screen.getPrimaryDisplay());
 
   tray = new Tray(nativeImage.createFromPath(path.join(HERE, 'assets', 'tray.png')));
-  tray.setToolTip('Desktop Fly');
+  tray.setToolTip('Desktop Roach');
   refreshTray();
+
+  // breeding demo: two ready companions and a fast colony clock, so the whole
+  // cycle plays out in about a minute (the --demo-pair of the macOS build)
+  if (process.argv.includes('--demo-pair')) {
+    pendingCommands.push({ name: 'addFly' }, { name: 'addFly' },
+      { name: 'setBreedingSpeed', value: 20 });
+  }
 
   mouseTimer = setInterval(pollAmbient, 1000 / 30);
   windowTimer = setInterval(pollWindows, 700);
@@ -360,6 +434,21 @@ app.whenReady().then(() => {
 ipcMain.handle('brain-data', () => brainData);
 ipcMain.on('spikes', (_e, list) => send(brain, 'spikes', list));
 ipcMain.on('stimulate', (_e, req) => send(overlay, 'stimulate', req));
+// periodic colony snapshot from the overlay, for the tray status row. The
+// renderer owns the live values, so the reported speed/cap also re-align the
+// radio checkmarks after an overlay reload reset them to defaults.
+ipcMain.on('colony-status', (_e, st) => {
+  breedingSpeed = st.speed;
+  colonyCap = st.cap;
+  const label = breedingOn
+    ? `n=${st.count} canMate=${st.canMate} nearest=${st.nearest} speed=×${st.speed} asleep=${st.asleep}`
+    : 'colony paused';
+  // rebuilding the context menu closes it on Windows while the user holds it
+  // open, so skip the rebuild when nothing visible changed
+  if (label === colonyStatus) return;
+  colonyStatus = label;
+  refreshTray();
+});
 
 app.on('window-all-closed', () => { /* tray-only app: stay alive */ });
 app.on('before-quit', () => {

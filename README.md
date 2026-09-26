@@ -54,7 +54,8 @@ to stimulate it.
   steering once the dart ends.
 - **Consistent timing and Windows support:** the full neural/body feedback loop
   runs at 120 Hz independently of display refresh. The Electron port shares the
-  motor mechanics and transition fixes; the beetle body remains macOS-only.
+  motor mechanics and transition fixes and now runs the roach body and breeding
+  colony; the beetle body remains macOS-only.
 - **Validation and provenance:** added reproducible extraction, source hashes,
   separate MaleCNS data licensing and 18 locomotor checks on each platform.
   All native and JavaScript suites pass. Native motion sequences were visually
@@ -121,13 +122,16 @@ the same test suites lives in [`windows/`](windows/) (contributed by
 ```sh
 cd desktop-fly/windows
 npm install
-npm start          # tray icon 🪰; quit from there
+npm start          # tray icon; quit from there
 npm test           # all three suites, headless
+npm run snapshot   # offscreen body render (like ./DesktopRoach --snapshot)
 ```
 
 See [windows/README.md](windows/README.md) for the macOS→Windows mapping
 table and platform notes (the fly there roams all monitors on its own).
-The optional stag-beetle and cockroach bodies are macOS-only for now.
+The port boots as the cockroach and carries the breeding colony (tray
+controls for speed, colony cap, and pairing); the optional stag-beetle
+body remains macOS-only for now.
 
 ## Controls (menu bar 🪳)
 
